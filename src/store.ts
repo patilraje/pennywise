@@ -1,0 +1,626 @@
+import { create } from 'zustand';
+import type {
+  Category,
+  Expense,
+  HisaabParseResult,
+  IncomeEntry,
+  PayPeriod,
+  PendingNote,
+  PeriodMeta,
+  Pot,
+} from './types';
+import {
+  DEFAULT_ANCHOR,
+  buildPeriodsFromAnchor,
+  ensurePeriodForDate,
+  findPeriodByStart,
+  makePeriod,
+} from './utils/periods';
+
+const STORAGE_KEY = 'pennywise-v2';
+const LEGACY_KEY = 'pennywise-step1';
+
+type Persisted = {
+  categories: Category[];
+  pots: Pot[];
+  expenses: Expense[];
+  pending: PendingNote[];
+  periods: PayPeriod[];
+  selectedPeriodId: string;
+  periodMetas: PeriodMeta[];
+  incomeEntries: IncomeEntry[];
+};
+
+function uid(prefix: string): string {
+  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function money(n: number): number {
+  return Math.round(n * 1000) / 1000;
+}
+
+function defaultCategories(periodId: string): Category[] {
+  const seed: { id: string; name: string; budget: number }[] = [
+    { id: 'cat-food', name: 'Food', budget: 500 },
+    { id: 'cat-other', name: 'Other', budget: 1000 },
+    { id: 'cat-gas', name: 'Gas', budget: 350 },
+    { id: 'cat-rent', name: 'Rent', budget: 1000 },
+    { id: 'cat-insurance', name: 'Insurance etc', budget: 145 },
+    { id: 'cat-savings', name: 'Savings', budget: 2000 },
+    { id: 'cat-costco', name: 'Costco Membership', budget: 5 },
+  ];
+  return seed.map((c) => ({
+    id: c.id,
+    name: c.name,
+    budgetsByPeriod: { [periodId]: c.budget },
+  }));
+}
+
+function emptyMeta(periodId: string): PeriodMeta {
+  return { periodId, overallBudget: 0, incomeLump: 0 };
+}
+
+function defaultState(): Persisted {
+  const periods = buildPeriodsFromAnchor(DEFAULT_ANCHOR, '2026-09-19', 3);
+  const first = periods[0] ?? makePeriod(DEFAULT_ANCHOR);
+  return {
+    categories: defaultCategories(first.id),
+    pots: [],
+    expenses: [],
+    pending: [],
+    periods,
+    selectedPeriodId: first.id,
+    periodMetas: [emptyMeta(first.id)],
+    incomeEntries: [],
+  };
+}
+
+function migrateLegacy(raw: string): Persisted | null {
+  try {
+    const parsed = JSON.parse(raw) as {
+      categories?: { id: string; name: string; budget?: number; budgetsByPeriod?: Record<string, number> }[];
+      pots?: Pot[];
+      expenses?: Expense[];
+      pending?: PendingNote[];
+    };
+    const base = defaultState();
+    const pid = base.selectedPeriodId;
+    const categories: Category[] = (parsed.categories?.length ? parsed.categories : base.categories).map((c) => {
+      const legacy = c as { id: string; name: string; budget?: number; budgetsByPeriod?: Record<string, number> };
+      return {
+        id: legacy.id,
+        name: legacy.name,
+        budgetsByPeriod: legacy.budgetsByPeriod ?? { [pid]: legacy.budget ?? 0 },
+      };
+    });
+    return {
+      ...base,
+      categories,
+      pots: (parsed.pots ?? []).map((p) => ({ ...p, periodId: p.periodId ?? pid })),
+      expenses: (parsed.expenses ?? []).map((e) => ({ ...e, periodId: e.periodId ?? pid })),
+      pending: (parsed.pending ?? []).map((p) => ({ ...p, periodId: p.periodId ?? pid })),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function load(): Persisted {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Persisted;
+      const periods =
+        parsed.periods?.length > 0
+          ? parsed.periods
+          : buildPeriodsFromAnchor(DEFAULT_ANCHOR, '2026-09-19', 3);
+      const selectedPeriodId =
+        periods.find((p) => p.id === parsed.selectedPeriodId)?.id ?? periods[0].id;
+      return {
+        categories: parsed.categories?.length ? parsed.categories : defaultCategories(selectedPeriodId),
+        pots: parsed.pots ?? [],
+        expenses: parsed.expenses ?? [],
+        pending: parsed.pending ?? [],
+        periods,
+        selectedPeriodId,
+        periodMetas: parsed.periodMetas ?? [emptyMeta(selectedPeriodId)],
+        incomeEntries: parsed.incomeEntries ?? [],
+      };
+    }
+    const legacy = localStorage.getItem(LEGACY_KEY);
+    if (legacy) {
+      const migrated = migrateLegacy(legacy);
+      if (migrated) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+        return migrated;
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+  return defaultState();
+}
+
+function persist(state: Persisted) {
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      categories: state.categories,
+      pots: state.pots,
+      expenses: state.expenses,
+      pending: state.pending,
+      periods: state.periods,
+      selectedPeriodId: state.selectedPeriodId,
+      periodMetas: state.periodMetas,
+      incomeEntries: state.incomeEntries,
+    }),
+  );
+}
+
+function ensureCategory(
+  categories: Category[],
+  name: string,
+  periodId: string,
+): { categories: Category[]; id: string } {
+  const existing = categories.find((c) => c.name.toLowerCase() === name.toLowerCase());
+  if (existing) return { categories, id: existing.id };
+  const created: Category = { id: uid('cat'), name, budgetsByPeriod: { [periodId]: 0 } };
+  return { categories: [...categories, created], id: created.id };
+}
+
+function getMeta(metas: PeriodMeta[], periodId: string): PeriodMeta {
+  return metas.find((m) => m.periodId === periodId) ?? emptyMeta(periodId);
+}
+
+type Store = Persisted & {
+  setSelectedPeriodId: (id: string) => void;
+  ensurePeriodsThrough: (date: string) => void;
+  confirmParse: (result: HisaabParseResult) => void;
+  updateCategoryName: (id: string, name: string) => void;
+  updateCategoryBudget: (id: string, budget: number, periodId?: string) => void;
+  updatePotOpening: (potId: string, openingAmount: number) => void;
+  addCategory: (name: string) => string;
+  deleteCategory: (id: string) => void;
+  updateExpense: (
+    id: string,
+    patch: Partial<Pick<Expense, 'amount' | 'label' | 'categoryId' | 'date' | 'potId'>>,
+  ) => void;
+  deleteExpense: (id: string) => void;
+  deletePending: (id: string) => void;
+  setOverallBudget: (periodId: string, amount: number) => void;
+  setIncomeLump: (periodId: string, amount: number) => void;
+  addIncomeEntry: (entry: Omit<IncomeEntry, 'id'> & { id?: string }) => void;
+  deleteIncomeEntry: (id: string) => void;
+  clearTransactions: () => void;
+  clearAll: () => void;
+  /** Align category budgets ↔ pot openings for a period (pots are source of truth). */
+  syncPeriodAllocations: (periodId?: string) => void;
+};
+
+export const useStore = create<Store>((set, get) => {
+  const initial = load();
+  return {
+    ...initial,
+
+    setSelectedPeriodId: (id) => {
+      const next = { ...get(), selectedPeriodId: id };
+      persist(next);
+      set({ selectedPeriodId: id });
+    },
+
+    ensurePeriodsThrough: (date) => {
+      const { periods, period } = ensurePeriodForDate(get().periods, date);
+      const metas = get().periodMetas.some((m) => m.periodId === period.id)
+        ? get().periodMetas
+        : [...get().periodMetas, emptyMeta(period.id)];
+      const next = { ...get(), periods, periodMetas: metas };
+      persist(next);
+      set({ periods, periodMetas: metas });
+    },
+
+    confirmParse: (result) => {
+      let periods = get().periods;
+      let periodId = get().selectedPeriodId;
+
+      if (result.periodStart) {
+        const { periods: nextPeriods, period } = ensurePeriodForDate(periods, result.periodStart);
+        periods = nextPeriods;
+        // Prefer exact start match
+        const byStart = findPeriodByStart(periods, result.periodStart) ?? period;
+        periodId = byStart.id;
+        if (!periods.some((p) => p.id === byStart.id)) {
+          periods = [...periods, byStart].sort((a, b) => a.start.localeCompare(b.start));
+        }
+      }
+
+      const period = periods.find((p) => p.id === periodId) ?? periods[0];
+      periodId = period.id;
+      const date =
+        todayIso() >= period.start && todayIso() <= period.end ? todayIso() : period.start;
+
+      let categories = [...get().categories];
+      let periodMetas = get().periodMetas;
+      if (!periodMetas.some((m) => m.periodId === periodId)) {
+        periodMetas = [...periodMetas, emptyMeta(periodId)];
+      }
+
+      const potIdMap = new Map<string, string>();
+      const newPots: Pot[] = [];
+      const newExpenses: Expense[] = [];
+      const t = nowIso();
+
+      for (const p of result.pots) {
+        const id = uid('pot');
+        potIdMap.set(p.tempId, id);
+        newPots.push({
+          id,
+          name: p.name,
+          openingAmount: p.openingAmount,
+          periodId,
+          createdAt: t,
+        });
+      }
+
+      for (const e of result.expenses) {
+        const ensured = ensureCategory(categories, e.categoryName, periodId);
+        categories = ensured.categories;
+        const potId = potIdMap.get(e.potTempId);
+        if (!potId) continue;
+        newExpenses.push({
+          id: uid('exp'),
+          amount: e.amount,
+          label: e.label,
+          categoryId: ensured.id,
+          potId,
+          periodId,
+          date,
+          createdAt: t,
+        });
+      }
+
+      // Dedicate category budgets from pot openings (Food - 500 → Food budget 500)
+      for (const p of newPots) {
+        const ensured = ensureCategory(categories, p.name, periodId);
+        categories = ensured.categories.map((c) =>
+          c.id === ensured.id
+            ? {
+                ...c,
+                budgetsByPeriod: {
+                  ...c.budgetsByPeriod,
+                  [periodId]: money(p.openingAmount),
+                },
+              }
+            : c,
+        );
+      }
+
+      const newPending: PendingNote[] = result.pending.map((text) => ({
+        id: uid('pend'),
+        text,
+        periodId,
+        createdAt: t,
+      }));
+
+      const next: Persisted = {
+        categories,
+        pots: [...get().pots, ...newPots],
+        expenses: [...get().expenses, ...newExpenses],
+        pending: [...get().pending, ...newPending],
+        periods,
+        selectedPeriodId: periodId,
+        periodMetas,
+        incomeEntries: get().incomeEntries,
+      };
+      persist(next);
+      set(next);
+    },
+
+    updateCategoryName: (id, name) => {
+      const categories = get().categories.map((c) =>
+        c.id === id ? { ...c, name: name.trim() || c.name } : c,
+      );
+      const next = { ...get(), categories };
+      persist(next);
+      set({ categories });
+    },
+
+    updateCategoryBudget: (id, budget, periodId) => {
+      const pid = periodId ?? get().selectedPeriodId;
+      const amount = Math.max(0, money(budget));
+      const cat = get().categories.find((c) => c.id === id);
+      const categories = get().categories.map((c) =>
+        c.id === id
+          ? { ...c, budgetsByPeriod: { ...c.budgetsByPeriod, [pid]: amount } }
+          : c,
+      );
+      // Keep matching pot opening in sync with dedication
+      let pots = get().pots;
+      if (cat) {
+        const match = pots.find(
+          (p) => p.periodId === pid && p.name.toLowerCase() === cat.name.toLowerCase(),
+        );
+        if (match) {
+          pots = pots.map((p) => (p.id === match.id ? { ...p, openingAmount: amount } : p));
+        } else if (amount > 0) {
+          pots = [
+            ...pots,
+            {
+              id: uid('pot'),
+              name: cat.name,
+              openingAmount: amount,
+              periodId: pid,
+              createdAt: nowIso(),
+            },
+          ];
+        }
+      }
+      const next = { ...get(), categories, pots };
+      persist(next);
+      set({ categories, pots });
+    },
+
+    updatePotOpening: (potId, openingAmount) => {
+      const amount = Math.max(0, money(openingAmount));
+      const pot = get().pots.find((p) => p.id === potId);
+      if (!pot) return;
+      const pots = get().pots.map((p) => (p.id === potId ? { ...p, openingAmount: amount } : p));
+      // Sync category dedication with pot
+      let categories = get().categories;
+      const ensured = ensureCategory(categories, pot.name, pot.periodId);
+      categories = ensured.categories.map((c) =>
+        c.id === ensured.id
+          ? { ...c, budgetsByPeriod: { ...c.budgetsByPeriod, [pot.periodId]: amount } }
+          : c,
+      );
+      const next = { ...get(), pots, categories };
+      persist(next);
+      set({ pots, categories });
+    },
+
+    addCategory: (name) => {
+      const trimmed = name.trim();
+      if (!trimmed) return '';
+      const existing = get().categories.find((c) => c.name.toLowerCase() === trimmed.toLowerCase());
+      if (existing) return existing.id;
+      const pid = get().selectedPeriodId;
+      const created: Category = { id: uid('cat'), name: trimmed, budgetsByPeriod: { [pid]: 0 } };
+      const categories = [...get().categories, created];
+      const next = { ...get(), categories };
+      persist(next);
+      set({ categories });
+      return created.id;
+    },
+
+    deleteCategory: (id) => {
+      const cats = get().categories;
+      if (cats.length <= 1) return;
+      const target = cats.find((c) => c.id === id);
+      if (!target) return;
+
+      let categories = cats.filter((c) => c.id !== id);
+      let other = categories.find((c) => c.name.toLowerCase() === 'other');
+      if (!other) {
+        other = { id: uid('cat'), name: 'Other', budgetsByPeriod: {} };
+        categories = [...categories, other];
+      }
+      const fallbackId = target.name.toLowerCase() === 'other' ? categories[0]?.id : other.id;
+      if (!fallbackId) return;
+
+      const expenses = get().expenses.map((e) =>
+        e.categoryId === id ? { ...e, categoryId: fallbackId } : e,
+      );
+      const next = { ...get(), categories, expenses };
+      persist(next);
+      set({ categories, expenses });
+    },
+
+    updateExpense: (id, patch) => {
+      let pots = get().pots;
+      const expenses = get().expenses.map((e) => {
+        if (e.id !== id) return e;
+        const amount = patch.amount !== undefined ? Math.max(0, money(patch.amount)) : e.amount;
+        const categoryId = patch.categoryId ?? e.categoryId;
+        let potId = e.potId;
+        // Keep pot linkage in sync when category changes so pot remainders update
+        if (patch.categoryId && patch.categoryId !== e.categoryId) {
+          const cat = get().categories.find((c) => c.id === categoryId);
+          if (cat) {
+            const match = pots.find(
+              (p) =>
+                p.periodId === e.periodId && p.name.toLowerCase() === cat.name.toLowerCase(),
+            );
+            if (match) {
+              potId = match.id;
+            } else {
+              const created: Pot = {
+                id: uid('pot'),
+                name: cat.name,
+                openingAmount: getCategoryBudget(cat, e.periodId),
+                periodId: e.periodId,
+                createdAt: nowIso(),
+              };
+              pots = [...pots, created];
+              potId = created.id;
+            }
+          }
+        }
+        return {
+          ...e,
+          ...patch,
+          amount,
+          categoryId,
+          potId,
+          label: patch.label !== undefined ? patch.label.trim() || e.label : e.label,
+        };
+      });
+      const next = { ...get(), expenses, pots };
+      persist(next);
+      set({ expenses, pots });
+    },
+
+    deleteExpense: (id) => {
+      const expenses = get().expenses.filter((e) => e.id !== id);
+      const next = { ...get(), expenses };
+      persist(next);
+      set({ expenses });
+    },
+
+    deletePending: (id) => {
+      const pending = get().pending.filter((p) => p.id !== id);
+      const next = { ...get(), pending };
+      persist(next);
+      set({ pending });
+    },
+
+    setOverallBudget: (periodId, amount) => {
+      const metas = [...get().periodMetas];
+      const idx = metas.findIndex((m) => m.periodId === periodId);
+      const meta = { ...getMeta(metas, periodId), overallBudget: Math.max(0, money(amount)) };
+      if (idx >= 0) metas[idx] = meta;
+      else metas.push(meta);
+      const next = { ...get(), periodMetas: metas };
+      persist(next);
+      set({ periodMetas: metas });
+    },
+
+    setIncomeLump: (periodId, amount) => {
+      const metas = [...get().periodMetas];
+      const idx = metas.findIndex((m) => m.periodId === periodId);
+      const meta = { ...getMeta(metas, periodId), incomeLump: Math.max(0, money(amount)) };
+      if (idx >= 0) metas[idx] = meta;
+      else metas.push(meta);
+      const next = { ...get(), periodMetas: metas };
+      persist(next);
+      set({ periodMetas: metas });
+    },
+
+    addIncomeEntry: (entry) => {
+      const row: IncomeEntry = {
+        id: entry.id ?? uid('inc'),
+        amount: Math.max(0, money(entry.amount)),
+        label: entry.label.trim() || 'Income',
+        date: entry.date,
+        periodId: entry.periodId,
+      };
+      const incomeEntries = [...get().incomeEntries, row];
+      const next = { ...get(), incomeEntries };
+      persist(next);
+      set({ incomeEntries });
+    },
+
+    deleteIncomeEntry: (id) => {
+      const incomeEntries = get().incomeEntries.filter((e) => e.id !== id);
+      const next = { ...get(), incomeEntries };
+      persist(next);
+      set({ incomeEntries });
+    },
+
+    clearTransactions: () => {
+      const pid = get().selectedPeriodId;
+      const next: Persisted = {
+        ...get(),
+        pots: get().pots.filter((p) => p.periodId !== pid),
+        expenses: get().expenses.filter((e) => e.periodId !== pid),
+        pending: get().pending.filter((p) => p.periodId !== pid),
+        incomeEntries: get().incomeEntries.filter((e) => e.periodId !== pid),
+        periodMetas: get().periodMetas.map((m) =>
+          m.periodId === pid ? emptyMeta(pid) : m,
+        ),
+      };
+      persist(next);
+      set({
+        pots: next.pots,
+        expenses: next.expenses,
+        pending: next.pending,
+        incomeEntries: next.incomeEntries,
+        periodMetas: next.periodMetas,
+      });
+    },
+
+    clearAll: () => {
+      const next = defaultState();
+      persist(next);
+      set(next);
+    },
+
+    syncPeriodAllocations: (periodId) => {
+      const pid = periodId ?? get().selectedPeriodId;
+      let categories = [...get().categories];
+      let changed = false;
+
+      // Pot openings are the allocations from income — mirror onto category budgets
+      for (const pot of get().pots.filter((p) => p.periodId === pid)) {
+        const ensured = ensureCategory(categories, pot.name, pid);
+        if (ensured.categories.length !== categories.length) changed = true;
+        categories = ensured.categories;
+        const cat = categories.find((c) => c.id === ensured.id)!;
+        const nextAmount = money(pot.openingAmount);
+        if (getCategoryBudget(cat, pid) !== nextAmount) {
+          changed = true;
+          categories = categories.map((c) =>
+            c.id === ensured.id
+              ? { ...c, budgetsByPeriod: { ...c.budgetsByPeriod, [pid]: nextAmount } }
+              : c,
+          );
+        }
+      }
+
+      if (!changed) return;
+      const next = { ...get(), categories };
+      persist(next);
+      set({ categories });
+    },
+  };
+});
+
+export function formatMoney(n: number): string {
+  return n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+}
+
+export function potSpent(potId: string, expenses: Expense[]): number {
+  return money(expenses.filter((e) => e.potId === potId).reduce((s, e) => s + e.amount, 0));
+}
+
+export function categorySpent(categoryId: string, expenses: Expense[]): number {
+  return money(expenses.filter((e) => e.categoryId === categoryId).reduce((s, e) => s + e.amount, 0));
+}
+
+export function getCategoryBudget(cat: Category, periodId: string): number {
+  return cat.budgetsByPeriod[periodId] ?? 0;
+}
+
+/**
+ * Money locked into pots for a period.
+ * Every pot opening subtracts from income whether spent or not (e.g. $2k Savings).
+ */
+export function getTotalDedicated(
+  _categories: Category[],
+  pots: Pot[],
+  periodId: string,
+): number {
+  return money(
+    pots.filter((p) => p.periodId === periodId).reduce((s, p) => s + p.openingAmount, 0),
+  );
+}
+
+export function getPeriodIncome(
+  periodId: string,
+  metas: PeriodMeta[],
+  entries: IncomeEntry[],
+): number {
+  const lump = getMeta(metas, periodId).incomeLump;
+  const lines = entries.filter((e) => e.periodId === periodId).reduce((s, e) => s + e.amount, 0);
+  return money(lump + lines);
+}
+
+export function getPeriodMeta(metas: PeriodMeta[], periodId: string): PeriodMeta {
+  return getMeta(metas, periodId);
+}
