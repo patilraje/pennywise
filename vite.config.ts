@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 
 // GitHub Pages project site: https://<user>.github.io/Pennywise/
-const base = process.env.VITE_BASE ?? '/';
+const base = '/pennywise/';
 
 export default defineConfig({
   base,
