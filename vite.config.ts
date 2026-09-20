@@ -2,8 +2,8 @@ import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
-// GitHub Pages project site: https://<user>.github.io/Pennywise/
-const base = '/pennywise/';
+// Local: '/'. CI sets VITE_BASE=/pennywise/ for GitHub Pages.
+const base = process.env.VITE_BASE ?? '/';
 
 export default defineConfig({
   base,
