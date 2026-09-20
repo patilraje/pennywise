@@ -1,8 +1,8 @@
-# PennyWise (Step 1)
+# PennyWise
 
-Paste Hisaab notes → confirm → view expenses and edit category budgets.
+4-week budgeting app: paste Hisaab notes, track pots, dedications, savings, and analytics.
 
-## Run
+## Run locally
 
 ```bash
 npm install
@@ -11,7 +11,10 @@ npm run dev
 
 Open http://localhost:5173/
 
-## Tabs
+## GitHub Pages
 
-1. **Ask PennyWise** — paste Hisaab text, Parse, then Confirm all
-2. **Transactions** — pots, expenses by category, edit category name + budget, pending notes
+After push to `main`, GitHub Actions deploys to:
+
+**https://patilraje.github.io/pennywise/**
+
+Enable Pages if needed: repo **Settings → Pages → Source: GitHub Actions**.
