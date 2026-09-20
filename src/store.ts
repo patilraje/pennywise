@@ -48,19 +48,20 @@ function money(n: number): number {
 }
 
 function defaultCategories(periodId: string): Category[] {
-  const seed: { id: string; name: string; budget: number }[] = [
-    { id: 'cat-food', name: 'Food', budget: 500 },
-    { id: 'cat-other', name: 'Other', budget: 1000 },
-    { id: 'cat-gas', name: 'Gas', budget: 350 },
-    { id: 'cat-rent', name: 'Rent', budget: 1000 },
-    { id: 'cat-insurance', name: 'Insurance etc', budget: 145 },
-    { id: 'cat-savings', name: 'Savings', budget: 2000 },
-    { id: 'cat-costco', name: 'Costco Membership', budget: 5 },
+  // Names only — dedications start at $0; users set amounts via Budget / Hisaab.
+  const seed: { id: string; name: string }[] = [
+    { id: 'cat-food', name: 'Food' },
+    { id: 'cat-other', name: 'Other' },
+    { id: 'cat-gas', name: 'Gas' },
+    { id: 'cat-rent', name: 'Rent' },
+    { id: 'cat-insurance', name: 'Insurance etc' },
+    { id: 'cat-savings', name: 'Savings' },
+    { id: 'cat-costco', name: 'Costco Membership' },
   ];
   return seed.map((c) => ({
     id: c.id,
     name: c.name,
-    budgetsByPeriod: { [periodId]: c.budget },
+    budgetsByPeriod: { [periodId]: 0 },
   }));
 }
 
