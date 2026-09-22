@@ -9,6 +9,8 @@ import type {
   PeriodMeta,
   Pot,
 } from './types';
+import { categoryFromPot } from './services/hisaabParser';
+import { parseExpenseBulkLines } from './utils/expenseLines';
 import {
   DEFAULT_ANCHOR,
   buildPeriodsFromAnchor,
@@ -181,6 +183,13 @@ function getMeta(metas: PeriodMeta[], periodId: string): PeriodMeta {
   return metas.find((m) => m.periodId === periodId) ?? emptyMeta(periodId);
 }
 
+function expenseDateForPeriod(period: PayPeriod | undefined, date?: string): string {
+  if (date) return date;
+  const today = todayIso();
+  if (period && today >= period.start && today <= period.end) return today;
+  return period?.start ?? today;
+}
+
 type Store = Persisted & {
   setSelectedPeriodId: (id: string) => void;
   ensurePeriodsThrough: (date: string) => void;
@@ -195,6 +204,16 @@ type Store = Persisted & {
     patch: Partial<Pick<Expense, 'amount' | 'label' | 'categoryId' | 'date' | 'potId'>>,
   ) => void;
   deleteExpense: (id: string) => void;
+  addExpenseToPot: (params: {
+    potId: string;
+    amount: number;
+    label?: string;
+    date?: string;
+  }) => boolean;
+  addBulkExpensesToPot: (
+    potId: string,
+    text: string,
+  ) => { added: number; errors: string[] };
   deletePending: (id: string) => void;
   setOverallBudget: (periodId: string, amount: number) => void;
   setIncomeLump: (periodId: string, amount: number) => void;
@@ -204,6 +223,8 @@ type Store = Persisted & {
   clearAll: () => void;
   /** Align category budgets ↔ pot openings for a period (pots are source of truth). */
   syncPeriodAllocations: (periodId?: string) => void;
+  /** Ensure every category has a pot row for this period (openings stay period-scoped). */
+  ensurePeriodPots: (periodId?: string) => void;
 };
 
 export const useStore = create<Store>((set, get) => {
@@ -215,6 +236,7 @@ export const useStore = create<Store>((set, get) => {
       const next = { ...get(), selectedPeriodId: id };
       persist(next);
       set({ selectedPeriodId: id });
+      get().ensurePeriodPots(id);
     },
 
     ensurePeriodsThrough: (date) => {
@@ -397,6 +419,7 @@ export const useStore = create<Store>((set, get) => {
       const next = { ...get(), categories };
       persist(next);
       set({ categories });
+      get().ensurePeriodPots(pid);
       return created.id;
     },
 
@@ -472,6 +495,73 @@ export const useStore = create<Store>((set, get) => {
       const next = { ...get(), expenses };
       persist(next);
       set({ expenses });
+    },
+
+    addExpenseToPot: (params) => {
+      const pot = get().pots.find((p) => p.id === params.potId);
+      if (!pot) return false;
+      const amount = Math.max(0, money(params.amount));
+      if (!(amount > 0)) return false;
+
+      let categories = get().categories;
+      const catName = categoryFromPot(pot.name);
+      const ensured = ensureCategory(categories, catName, pot.periodId);
+      categories = ensured.categories;
+
+      const period = get().periods.find((p) => p.id === pot.periodId);
+      const t = nowIso();
+      const expense: Expense = {
+        id: uid('exp'),
+        amount,
+        label: (params.label ?? '').trim() || 'expense',
+        categoryId: ensured.id,
+        potId: pot.id,
+        periodId: pot.periodId,
+        date: expenseDateForPeriod(period, params.date),
+        createdAt: t,
+      };
+      const next = { ...get(), categories, expenses: [...get().expenses, expense] };
+      persist(next);
+      set({ categories, expenses: next.expenses });
+      return true;
+    },
+
+    addBulkExpensesToPot: (potId, text) => {
+      const pot = get().pots.find((p) => p.id === potId);
+      if (!pot) return { added: 0, errors: ['Pot not found.'] };
+
+      const { expenses: parsed, errors } = parseExpenseBulkLines(text);
+      if (parsed.length === 0) {
+        return { added: 0, errors: errors.length ? errors : ['No valid expense lines.'] };
+      }
+
+      let categories = get().categories;
+      const catName = categoryFromPot(pot.name);
+      const ensured = ensureCategory(categories, catName, pot.periodId);
+      categories = ensured.categories;
+
+      const period = get().periods.find((p) => p.id === pot.periodId);
+      const date = expenseDateForPeriod(period);
+      const t = nowIso();
+      const newExpenses: Expense[] = parsed.map((row) => ({
+        id: uid('exp'),
+        amount: row.amount,
+        label: row.label,
+        categoryId: ensured.id,
+        potId: pot.id,
+        periodId: pot.periodId,
+        date,
+        createdAt: t,
+      }));
+
+      const next = {
+        ...get(),
+        categories,
+        expenses: [...get().expenses, ...newExpenses],
+      };
+      persist(next);
+      set({ categories, expenses: next.expenses });
+      return { added: newExpenses.length, errors };
     },
 
     deletePending: (id) => {
@@ -579,8 +669,49 @@ export const useStore = create<Store>((set, get) => {
       persist(next);
       set({ categories });
     },
+
+    ensurePeriodPots: (periodId) => {
+      const pid = periodId ?? get().selectedPeriodId;
+      const toAdd = potsToCreateForPeriod(get().categories, get().pots, pid);
+      if (toAdd.length === 0) return;
+      const t = nowIso();
+      const pots = [
+        ...get().pots,
+        ...toAdd.map((row) => ({
+          id: uid('pot'),
+          name: row.name,
+          openingAmount: row.openingAmount,
+          periodId: row.periodId,
+          createdAt: t,
+        })),
+      ];
+      const next = { ...get(), pots };
+      persist(next);
+      set({ pots });
+    },
   };
 });
+
+/**
+ * Pots that need to be created so every category has a row for this period.
+ * Openings use this period's dedication only — never copied from other periods.
+ */
+export function potsToCreateForPeriod(
+  categories: Category[],
+  pots: Pot[],
+  periodId: string,
+): { name: string; openingAmount: number; periodId: string }[] {
+  const covered = new Set(
+    pots.filter((p) => p.periodId === periodId).map((p) => p.name.toLowerCase()),
+  );
+  return categories
+    .filter((c) => !covered.has(c.name.toLowerCase()))
+    .map((c) => ({
+      name: c.name,
+      openingAmount: getCategoryBudget(c, periodId),
+      periodId,
+    }));
+}
 
 export function formatMoney(n: number): string {
   return n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });

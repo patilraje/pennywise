@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { DonutChart, HBarChart, StatTile } from '@/components/charts';
 import {
   categorySpent,
@@ -9,6 +9,7 @@ import {
 } from '@/store';
 import type { Expense } from '@/types';
 import { colorForName, softForName } from '@/utils/chartColors';
+import { periodLabel } from '@/utils/periods';
 
 type EditDraft = {
   amount: string;
@@ -30,14 +31,22 @@ export function TransactionsPage() {
   const deleteCategory = useStore((s) => s.deleteCategory);
   const updateExpense = useStore((s) => s.updateExpense);
   const deleteExpense = useStore((s) => s.deleteExpense);
+  const addExpenseToPot = useStore((s) => s.addExpenseToPot);
+  const addBulkExpensesToPot = useStore((s) => s.addBulkExpensesToPot);
   const deletePending = useStore((s) => s.deletePending);
   const clearTransactions = useStore((s) => s.clearTransactions);
+  const ensurePeriodPots = useStore((s) => s.ensurePeriodPots);
+  const periods = useStore((s) => s.periods);
 
   const [nameDrafts, setNameDrafts] = useState<Record<string, string>>({});
   const [budgetDrafts, setBudgetDrafts] = useState<Record<string, string>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<EditDraft | null>(null);
   const [newCategoryName, setNewCategoryName] = useState('');
+  const [potAmountDraft, setPotAmountDraft] = useState<Record<string, string>>({});
+  const [potLabelDraft, setPotLabelDraft] = useState<Record<string, string>>({});
+  const [potBulkOpen, setPotBulkOpen] = useState<Record<string, boolean>>({});
+  const [potBulkText, setPotBulkText] = useState<Record<string, string>>({});
 
   const expenses = useMemo(
     () => allExpenses.filter((e) => e.periodId === selectedPeriodId),
@@ -51,6 +60,12 @@ export function TransactionsPage() {
     () => allPending.filter((p) => p.periodId === selectedPeriodId),
     [allPending, selectedPeriodId],
   );
+
+  const period = periods.find((p) => p.id === selectedPeriodId);
+
+  useEffect(() => {
+    ensurePeriodPots(selectedPeriodId);
+  }, [selectedPeriodId, ensurePeriodPots]);
 
   const hasActivity = expenses.length > 0 || pots.length > 0 || pending.length > 0;
   const categoriesWithSpend = useMemo(() => {
@@ -101,13 +116,53 @@ export function TransactionsPage() {
     cancelEdit();
   };
 
+  const submitPotExpense = (potId: string) => {
+    const amountRaw = (potAmountDraft[potId] ?? '').replace(/[$,\s]/g, '');
+    const amount = Number.parseFloat(amountRaw);
+    if (!(amount > 0)) {
+      alert('Enter an amount greater than 0.');
+      return;
+    }
+    const ok = addExpenseToPot({
+      potId,
+      amount,
+      label: potLabelDraft[potId] ?? '',
+    });
+    if (ok) {
+      setPotAmountDraft((d) => ({ ...d, [potId]: '' }));
+      setPotLabelDraft((d) => ({ ...d, [potId]: '' }));
+    }
+  };
+
+  const submitPotBulk = (potId: string) => {
+    const text = potBulkText[potId] ?? '';
+    const { added, errors } = addBulkExpensesToPot(potId, text);
+    if (added > 0) {
+      setPotBulkText((d) => ({ ...d, [potId]: '' }));
+      setPotBulkOpen((d) => ({ ...d, [potId]: false }));
+    }
+    if (errors.length) {
+      alert(
+        added > 0
+          ? `Added ${added} expense(s). Some lines were skipped:\n${errors.join('\n')}`
+          : errors.join('\n'),
+      );
+    } else if (added === 0) {
+      alert('Paste lines like -4 sephora (one per line).');
+    }
+  };
+
   return (
     <div className="space-y-6">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Spending</h1>
           <p className="mt-1 text-sm text-muted">
-            Edit or delete expenses. Rename or remove categories, and adjust budgets.
+            Editing{' '}
+            <span className="font-semibold text-ink">
+              {period ? periodLabel(period) : 'selected period'}
+            </span>{' '}
+            only · add expenses under each pot (single or bulk)
           </p>
         </div>
         {hasActivity ? (
@@ -181,18 +236,27 @@ export function TransactionsPage() {
       {pots.length > 0 ? (
         <section className="rounded-2xl border border-line bg-surface p-4 shadow-soft">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">Pots</h2>
-          <ul className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          <p className="mt-1 text-xs text-muted">
+            Add one expense or bulk paste lines like <span className="font-mono">-4 sephora</span>{' '}
+            under each pot.
+          </p>
+          <ul className="mt-4 space-y-4">
             {pots.map((p) => {
               const spent = potSpent(p.id, expenses);
               const rem = Math.round((p.openingAmount - spent) * 1000) / 1000;
               const color = colorForName(p.name);
+              const potItems = expenses
+                .filter((e) => e.potId === p.id)
+                .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
+              const bulkOpen = potBulkOpen[p.id] ?? false;
+
               return (
                 <li
                   key={p.id}
-                  className="rounded-xl border border-line p-3 text-sm"
-                  style={{ background: softForName(p.name) }}
+                  className="rounded-xl border border-line p-4 text-sm"
+                  style={{ background: softForName(p.name), borderLeftWidth: 4, borderLeftColor: color }}
                 >
-                  <div className="flex justify-between font-semibold">
+                  <div className="flex flex-wrap items-start justify-between gap-2 font-semibold">
                     <span className="flex items-center gap-2">
                       <span className="h-2.5 w-2.5 rounded-full" style={{ background: color }} />
                       {p.name}
@@ -204,6 +268,131 @@ export function TransactionsPage() {
                   <p className="mt-1 text-xs text-muted">
                     Opened {formatMoney(p.openingAmount)} · spent {formatMoney(spent)}
                   </p>
+
+                  <ul className="mt-3 divide-y divide-line/80 rounded-lg bg-surface/80">
+                    {potItems.map((e) => (
+                      <li
+                        key={e.id}
+                        className="flex flex-wrap items-center justify-between gap-2 px-3 py-2"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-medium">{e.label}</p>
+                          <p className="text-xs text-muted">{e.date}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="tabular font-semibold text-danger">
+                            -{formatMoney(e.amount)}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => startEdit(e)}
+                            className="rounded-md border border-line px-2 py-1 text-xs font-semibold hover:bg-canvas"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (confirm(`Delete “${e.label}” (${formatMoney(e.amount)})?`)) {
+                                deleteExpense(e.id);
+                                if (editingId === e.id) cancelEdit();
+                              }
+                            }}
+                            className="rounded-md border border-danger/30 px-2 py-1 text-xs font-semibold text-danger hover:bg-danger/5"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                    {potItems.length === 0 ? (
+                      <li className="px-3 py-2 text-xs text-muted">No expenses in this pot yet.</li>
+                    ) : null}
+                  </ul>
+
+                  {!bulkOpen ? (
+                    <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+                      <div className="sm:w-28">
+                        <label className="text-xs text-muted" htmlFor={`pot-amt-${p.id}`}>
+                          Amount
+                        </label>
+                        <input
+                          id={`pot-amt-${p.id}`}
+                          inputMode="decimal"
+                          placeholder="4.00"
+                          className="mt-1 w-full rounded-lg border border-line px-3 py-2 tabular outline-none focus:ring-2 focus:ring-accent"
+                          value={potAmountDraft[p.id] ?? ''}
+                          onChange={(ev) =>
+                            setPotAmountDraft((d) => ({ ...d, [p.id]: ev.target.value }))
+                          }
+                          onKeyDown={(ev) => {
+                            if (ev.key === 'Enter') submitPotExpense(p.id);
+                          }}
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <label className="text-xs text-muted" htmlFor={`pot-lbl-${p.id}`}>
+                          Label
+                        </label>
+                        <input
+                          id={`pot-lbl-${p.id}`}
+                          placeholder="sephora"
+                          className="mt-1 w-full rounded-lg border border-line px-3 py-2 outline-none focus:ring-2 focus:ring-accent"
+                          value={potLabelDraft[p.id] ?? ''}
+                          onChange={(ev) =>
+                            setPotLabelDraft((d) => ({ ...d, [p.id]: ev.target.value }))
+                          }
+                          onKeyDown={(ev) => {
+                            if (ev.key === 'Enter') submitPotExpense(p.id);
+                          }}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => submitPotExpense(p.id)}
+                        className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white sm:self-end"
+                      >
+                        Add expense
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPotBulkOpen((d) => ({ ...d, [p.id]: true }))}
+                        className="rounded-lg border border-line px-4 py-2 text-sm font-semibold text-muted hover:text-ink sm:self-end"
+                      >
+                        Add in bulk
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="mt-3 space-y-2">
+                      <label className="text-xs font-semibold uppercase tracking-wide text-muted">
+                        Bulk add (one line per expense)
+                      </label>
+                      <textarea
+                        className="min-h-[100px] w-full rounded-lg border border-line bg-surface p-3 font-mono text-sm outline-none focus:ring-2 focus:ring-accent"
+                        placeholder={`-2\n-4 sephora\n-10 ulta`}
+                        value={potBulkText[p.id] ?? ''}
+                        onChange={(ev) =>
+                          setPotBulkText((d) => ({ ...d, [p.id]: ev.target.value }))
+                        }
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => submitPotBulk(p.id)}
+                          className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white"
+                        >
+                          Add all
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPotBulkOpen((d) => ({ ...d, [p.id]: false }))}
+                          className="rounded-lg border border-line px-4 py-2 text-sm font-medium"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </li>
               );
             })}

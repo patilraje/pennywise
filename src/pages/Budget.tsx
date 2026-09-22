@@ -27,6 +27,7 @@ export function BudgetPage() {
   const addIncomeEntry = useStore((s) => s.addIncomeEntry);
   const deleteIncomeEntry = useStore((s) => s.deleteIncomeEntry);
   const syncPeriodAllocations = useStore((s) => s.syncPeriodAllocations);
+  const ensurePeriodPots = useStore((s) => s.ensurePeriodPots);
 
   const period = periods.find((p) => p.id === selectedPeriodId);
   const expenses = useMemo(
@@ -53,8 +54,9 @@ export function BudgetPage() {
 
   // Keep pots ↔ dedications aligned so every allocation subtracts from income
   useEffect(() => {
+    ensurePeriodPots(selectedPeriodId);
     syncPeriodAllocations(selectedPeriodId);
-  }, [selectedPeriodId, syncPeriodAllocations]);
+  }, [selectedPeriodId, ensurePeriodPots, syncPeriodAllocations]);
 
   const potRows = useMemo(() => {
     return pots.map((p) => {
@@ -114,7 +116,11 @@ export function BudgetPage() {
       <header>
         <h1 className="text-3xl font-bold tracking-tight">Budget</h1>
         <p className="mt-1 text-sm text-muted">
-          {period ? periodLabel(period) : 'Selected period'} · dedicate from income · pots track spend
+          Editing{' '}
+          <span className="font-semibold text-ink">
+            {period ? periodLabel(period) : 'selected period'}
+          </span>{' '}
+          only · dedications & pots for this 4-week chunk
         </p>
       </header>
 
