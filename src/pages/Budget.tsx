@@ -93,6 +93,59 @@ export function BudgetPage() {
   /** Dedicated but not yet spent — still locked (e.g. $2k Savings untouched). */
   const sittingInPots = Math.round((dedicated - totalSpent) * 1000) / 1000;
 
+  const askDedicationScope = (
+    name: string,
+    amount: number,
+  ): 'this' | 'following' | null => {
+    if (
+      !confirm(
+        `Change dedication for “${name}” to ${formatMoney(amount)}?`,
+      )
+    ) {
+      return null;
+    }
+    const following = confirm(
+      `Also apply to all FOLLOWING periods?\n\nOK = this period + following\nCancel = this period only`,
+    );
+    return following ? 'following' : 'this';
+  };
+
+  const applyCategoryDedication = (
+    categoryId: string,
+    name: string,
+    raw: string,
+    previous: number,
+    input: HTMLInputElement,
+  ) => {
+    const n = Number.parseFloat(raw.replace(/[$,\s]/g, ''));
+    const amount = Number.isFinite(n) ? Math.max(0, n) : 0;
+    if (amount === previous) return;
+    const scope = askDedicationScope(name, amount);
+    if (!scope) {
+      input.value = String(previous);
+      return;
+    }
+    updateCategoryBudget(categoryId, amount, selectedPeriodId, scope);
+  };
+
+  const applyPotOpening = (
+    potId: string,
+    name: string,
+    raw: string,
+    previous: number,
+    input: HTMLInputElement,
+  ) => {
+    const n = Number.parseFloat(raw.replace(/[$,\s]/g, ''));
+    const amount = Number.isFinite(n) ? Math.max(0, n) : 0;
+    if (amount === previous) return;
+    const scope = askDedicationScope(name, amount);
+    if (!scope) {
+      input.value = String(previous);
+      return;
+    }
+    updatePotOpening(potId, amount, scope);
+  };
+
   const saveIncomeLump = () => {
     const n = Number.parseFloat(incomeLumpDraft.replace(/[$,\s]/g, ''));
     setIncomeLump(selectedPeriodId, Number.isFinite(n) ? n : 0);
@@ -239,7 +292,8 @@ export function BudgetPage() {
           Dedications (edit → updates pot)
         </h2>
         <p className="mt-1 text-xs text-muted">
-          Setting Food to $500 deducts $500 from unallocated income and sets the Food pot opening.
+          Setting Food to $500 deducts $500 from unallocated income. You can apply the change to
+          this period only, or this and all following periods.
         </p>
         {categoryRows.length === 0 ? (
           <p className="mt-3 text-sm text-muted">No categories yet — paste Hisaab or add one on Transactions.</p>
@@ -264,8 +318,13 @@ export function BudgetPage() {
                           defaultValue={String(c.budget)}
                           key={`${c.id}-${selectedPeriodId}-${c.budget}`}
                           onBlur={(e) => {
-                            const n = Number.parseFloat(e.target.value.replace(/[$,\s]/g, ''));
-                            updateCategoryBudget(c.id, Number.isFinite(n) ? n : 0, selectedPeriodId);
+                            applyCategoryDedication(
+                              c.id,
+                              c.name,
+                              e.target.value,
+                              c.budget,
+                              e.target,
+                            );
                           }}
                         />
                       </label>
@@ -322,8 +381,13 @@ export function BudgetPage() {
                           defaultValue={String(p.openingAmount)}
                           key={`${p.id}-${p.openingAmount}`}
                           onBlur={(e) => {
-                            const n = Number.parseFloat(e.target.value.replace(/[$,\s]/g, ''));
-                            updatePotOpening(p.id, Number.isFinite(n) ? n : 0);
+                            applyPotOpening(
+                              p.id,
+                              p.name,
+                              e.target.value,
+                              p.openingAmount,
+                              e.target,
+                            );
                           }}
                         />
                       </label>

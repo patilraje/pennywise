@@ -1,36 +1,82 @@
 import { describe, expect, it } from 'vitest';
-import { potsToCreateForPeriod } from '../store';
-import type { Category, Pot } from '../types';
+import {
+  openingForNewPeriodPot,
+  periodIdsFromInclusive,
+  potsToCreateForPeriod,
+  previousPeriodId,
+} from '../store';
+import type { Category, PayPeriod, Pot } from '../types';
 
-describe('potsToCreateForPeriod', () => {
+const periods: PayPeriod[] = [
+  { id: 'pp-a', start: '2026-08-24', end: '2026-09-20' },
+  { id: 'pp-b', start: '2026-09-21', end: '2026-10-18' },
+  { id: 'pp-c', start: '2026-10-19', end: '2026-11-15' },
+];
+
+describe('previousPeriodId / periodIdsFromInclusive', () => {
+  it('finds previous period by start date', () => {
+    expect(previousPeriodId(periods, 'pp-b')).toBe('pp-a');
+    expect(previousPeriodId(periods, 'pp-a')).toBeUndefined();
+  });
+
+  it('scopes this vs following', () => {
+    expect(periodIdsFromInclusive(periods, 'pp-b', 'this')).toEqual(['pp-b']);
+    expect(periodIdsFromInclusive(periods, 'pp-b', 'following')).toEqual(['pp-b', 'pp-c']);
+  });
+});
+
+describe('potsToCreateForPeriod carry-forward', () => {
   const categories: Category[] = [
-    { id: 'cat-food', name: 'Food', budgetsByPeriod: { 'pp-a': 500, 'pp-b': 0 } },
+    { id: 'cat-food', name: 'Food', budgetsByPeriod: { 'pp-a': 500 } },
     { id: 'cat-gas', name: 'Gas', budgetsByPeriod: { 'pp-a': 350 } },
   ];
 
-  it('creates missing pots using only that period’s dedication', () => {
+  it('carries previous pot opening into a new period', () => {
     const pots: Pot[] = [
       {
         id: 'pot-food-a',
         name: 'Food',
         openingAmount: 500,
         periodId: 'pp-a',
-        createdAt: '2026-01-01T00:00:00.000Z',
+        createdAt: 't',
+      },
+      {
+        id: 'pot-gas-a',
+        name: 'Gas',
+        openingAmount: 350,
+        periodId: 'pp-a',
+        createdAt: 't',
       },
     ];
 
-    const missingB = potsToCreateForPeriod(categories, pots, 'pp-b');
+    const missingB = potsToCreateForPeriod(categories, pots, 'pp-b', periods);
     expect(missingB).toEqual([
-      { name: 'Food', openingAmount: 0, periodId: 'pp-b' },
-      { name: 'Gas', openingAmount: 0, periodId: 'pp-b' },
+      { name: 'Food', openingAmount: 500, periodId: 'pp-b' },
+      { name: 'Gas', openingAmount: 350, periodId: 'pp-b' },
     ]);
-
-    // Period A still only needs Gas; does not rewrite Food’s 500
-    const missingA = potsToCreateForPeriod(categories, pots, 'pp-a');
-    expect(missingA).toEqual([{ name: 'Gas', openingAmount: 350, periodId: 'pp-a' }]);
   });
 
-  it('does not duplicate when pot already exists for the period', () => {
+  it('uses explicit dedication for this period instead of overwriting', () => {
+    const cats: Category[] = [
+      {
+        id: 'cat-food',
+        name: 'Food',
+        budgetsByPeriod: { 'pp-a': 500, 'pp-b': 200 },
+      },
+    ];
+    const pots: Pot[] = [
+      {
+        id: '1',
+        name: 'Food',
+        openingAmount: 500,
+        periodId: 'pp-a',
+        createdAt: 't',
+      },
+    ];
+    expect(openingForNewPeriodPot('Food', 'pp-b', cats, pots, periods)).toBe(200);
+  });
+
+  it('does not duplicate when pot already exists', () => {
     const pots: Pot[] = [
       {
         id: '1',
@@ -47,6 +93,6 @@ describe('potsToCreateForPeriod', () => {
         createdAt: 't',
       },
     ];
-    expect(potsToCreateForPeriod(categories, pots, 'pp-b')).toEqual([]);
+    expect(potsToCreateForPeriod(categories, pots, 'pp-b', periods)).toEqual([]);
   });
 });

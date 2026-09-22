@@ -195,8 +195,17 @@ type Store = Persisted & {
   ensurePeriodsThrough: (date: string) => void;
   confirmParse: (result: HisaabParseResult) => void;
   updateCategoryName: (id: string, name: string) => void;
-  updateCategoryBudget: (id: string, budget: number, periodId?: string) => void;
-  updatePotOpening: (potId: string, openingAmount: number) => void;
+  updateCategoryBudget: (
+    id: string,
+    budget: number,
+    periodId?: string,
+    scope?: 'this' | 'following',
+  ) => void;
+  updatePotOpening: (
+    potId: string,
+    openingAmount: number,
+    scope?: 'this' | 'following',
+  ) => void;
   addCategory: (name: string) => string;
   deleteCategory: (id: string) => void;
   updateExpense: (
@@ -355,54 +364,83 @@ export const useStore = create<Store>((set, get) => {
       set({ categories });
     },
 
-    updateCategoryBudget: (id, budget, periodId) => {
+    updateCategoryBudget: (id, budget, periodId, scope = 'this') => {
       const pid = periodId ?? get().selectedPeriodId;
       const amount = Math.max(0, money(budget));
       const cat = get().categories.find((c) => c.id === id);
-      const categories = get().categories.map((c) =>
-        c.id === id
-          ? { ...c, budgetsByPeriod: { ...c.budgetsByPeriod, [pid]: amount } }
-          : c,
-      );
-      // Keep matching pot opening in sync with dedication
+      if (!cat) return;
+
+      const targets = periodIdsFromInclusive(get().periods, pid, scope);
+      let categories = get().categories;
       let pots = get().pots;
-      if (cat) {
+      const t = nowIso();
+
+      for (const targetId of targets) {
+        categories = categories.map((c) =>
+          c.id === id
+            ? { ...c, budgetsByPeriod: { ...c.budgetsByPeriod, [targetId]: amount } }
+            : c,
+        );
         const match = pots.find(
-          (p) => p.periodId === pid && p.name.toLowerCase() === cat.name.toLowerCase(),
+          (p) => p.periodId === targetId && p.name.toLowerCase() === cat.name.toLowerCase(),
         );
         if (match) {
           pots = pots.map((p) => (p.id === match.id ? { ...p, openingAmount: amount } : p));
-        } else if (amount > 0) {
+        } else {
           pots = [
             ...pots,
             {
               id: uid('pot'),
               name: cat.name,
               openingAmount: amount,
-              periodId: pid,
-              createdAt: nowIso(),
+              periodId: targetId,
+              createdAt: t,
             },
           ];
         }
       }
+
       const next = { ...get(), categories, pots };
       persist(next);
       set({ categories, pots });
     },
 
-    updatePotOpening: (potId, openingAmount) => {
+    updatePotOpening: (potId, openingAmount, scope = 'this') => {
       const amount = Math.max(0, money(openingAmount));
       const pot = get().pots.find((p) => p.id === potId);
       if (!pot) return;
-      const pots = get().pots.map((p) => (p.id === potId ? { ...p, openingAmount: amount } : p));
-      // Sync category dedication with pot
+
+      const targets = periodIdsFromInclusive(get().periods, pot.periodId, scope);
       let categories = get().categories;
-      const ensured = ensureCategory(categories, pot.name, pot.periodId);
-      categories = ensured.categories.map((c) =>
-        c.id === ensured.id
-          ? { ...c, budgetsByPeriod: { ...c.budgetsByPeriod, [pot.periodId]: amount } }
-          : c,
-      );
+      let pots = get().pots;
+      const t = nowIso();
+
+      for (const targetId of targets) {
+        const ensured = ensureCategory(categories, pot.name, targetId);
+        categories = ensured.categories.map((c) =>
+          c.id === ensured.id
+            ? { ...c, budgetsByPeriod: { ...c.budgetsByPeriod, [targetId]: amount } }
+            : c,
+        );
+        const match = pots.find(
+          (p) => p.periodId === targetId && p.name.toLowerCase() === pot.name.toLowerCase(),
+        );
+        if (match) {
+          pots = pots.map((p) => (p.id === match.id ? { ...p, openingAmount: amount } : p));
+        } else {
+          pots = [
+            ...pots,
+            {
+              id: uid('pot'),
+              name: pot.name,
+              openingAmount: amount,
+              periodId: targetId,
+              createdAt: t,
+            },
+          ];
+        }
+      }
+
       const next = { ...get(), pots, categories };
       persist(next);
       set({ pots, categories });
@@ -672,7 +710,12 @@ export const useStore = create<Store>((set, get) => {
 
     ensurePeriodPots: (periodId) => {
       const pid = periodId ?? get().selectedPeriodId;
-      const toAdd = potsToCreateForPeriod(get().categories, get().pots, pid);
+      const toAdd = potsToCreateForPeriod(
+        get().categories,
+        get().pots,
+        pid,
+        get().periods,
+      );
       if (toAdd.length === 0) return;
       const t = nowIso();
       const pots = [
@@ -685,21 +728,80 @@ export const useStore = create<Store>((set, get) => {
           createdAt: t,
         })),
       ];
-      const next = { ...get(), pots };
+      // Set budgetsByPeriod for new pots only when this period has no dedication yet
+      let categories = get().categories;
+      for (const row of toAdd) {
+        const ensured = ensureCategory(categories, row.name, pid);
+        categories = ensured.categories.map((c) => {
+          if (c.id !== ensured.id) return c;
+          if (pid in c.budgetsByPeriod) return c;
+          return {
+            ...c,
+            budgetsByPeriod: { ...c.budgetsByPeriod, [pid]: row.openingAmount },
+          };
+        });
+      }
+      const next = { ...get(), pots, categories };
       persist(next);
-      set({ pots });
+      set({ pots, categories });
     },
   };
 });
 
+/** Period ids from `periodId` through the end of the sorted list (or just that id). */
+export function periodIdsFromInclusive(
+  periods: PayPeriod[],
+  periodId: string,
+  scope: 'this' | 'following',
+): string[] {
+  const sorted = [...periods].sort((a, b) => a.start.localeCompare(b.start));
+  const idx = sorted.findIndex((p) => p.id === periodId);
+  if (idx < 0) return [periodId];
+  if (scope === 'this') return [periodId];
+  return sorted.slice(idx).map((p) => p.id);
+}
+
+export function previousPeriodId(periods: PayPeriod[], periodId: string): string | undefined {
+  const sorted = [...periods].sort((a, b) => a.start.localeCompare(b.start));
+  const idx = sorted.findIndex((p) => p.id === periodId);
+  if (idx <= 0) return undefined;
+  return sorted[idx - 1]?.id;
+}
+
+/**
+ * Opening for a new pot in `periodId`: explicit dedication for this period if set,
+ * otherwise previous period’s pot opening, else previous dedication, else 0.
+ */
+export function openingForNewPeriodPot(
+  name: string,
+  periodId: string,
+  categories: Category[],
+  pots: Pot[],
+  periods: PayPeriod[],
+): number {
+  const cat = categories.find((c) => c.name.toLowerCase() === name.toLowerCase());
+  if (cat && periodId in cat.budgetsByPeriod) {
+    return getCategoryBudget(cat, periodId);
+  }
+  const prevId = previousPeriodId(periods, periodId);
+  if (!prevId) return 0;
+  const prevPot = pots.find(
+    (p) => p.periodId === prevId && p.name.toLowerCase() === name.toLowerCase(),
+  );
+  if (prevPot) return money(prevPot.openingAmount);
+  if (cat) return getCategoryBudget(cat, prevId);
+  return 0;
+}
+
 /**
  * Pots that need to be created so every category has a row for this period.
- * Openings use this period's dedication only — never copied from other periods.
+ * Openings carry forward from the previous period when this period has no dedication yet.
  */
 export function potsToCreateForPeriod(
   categories: Category[],
   pots: Pot[],
   periodId: string,
+  periods: PayPeriod[] = [],
 ): { name: string; openingAmount: number; periodId: string }[] {
   const covered = new Set(
     pots.filter((p) => p.periodId === periodId).map((p) => p.name.toLowerCase()),
@@ -708,7 +810,7 @@ export function potsToCreateForPeriod(
     .filter((c) => !covered.has(c.name.toLowerCase()))
     .map((c) => ({
       name: c.name,
-      openingAmount: getCategoryBudget(c, periodId),
+      openingAmount: openingForNewPeriodPot(c.name, periodId, categories, pots, periods),
       periodId,
     }));
 }
