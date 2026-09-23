@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type {
+  Card,
   Category,
   Expense,
   HisaabParseResult,
@@ -10,7 +11,7 @@ import type {
   Pot,
 } from './types';
 import { categoryFromPot } from './services/hisaabParser';
-import { parseExpenseBulkLines } from './utils/expenseLines';
+import { matchCardInLabel, parseExpenseBulkLines } from './utils/expenseLines';
 import {
   DEFAULT_ANCHOR,
   buildPeriodsFromAnchor,
@@ -31,6 +32,7 @@ type Persisted = {
   selectedPeriodId: string;
   periodMetas: PeriodMeta[];
   incomeEntries: IncomeEntry[];
+  cards: Card[];
 };
 
 function uid(prefix: string): string {
@@ -83,6 +85,7 @@ function defaultState(): Persisted {
     selectedPeriodId: first.id,
     periodMetas: [emptyMeta(first.id)],
     incomeEntries: [],
+    cards: [],
   };
 }
 
@@ -136,6 +139,7 @@ function load(): Persisted {
         selectedPeriodId,
         periodMetas: parsed.periodMetas ?? [emptyMeta(selectedPeriodId)],
         incomeEntries: parsed.incomeEntries ?? [],
+        cards: Array.isArray(parsed.cards) ? parsed.cards : [],
       };
     }
     const legacy = localStorage.getItem(LEGACY_KEY);
@@ -164,6 +168,7 @@ function persist(state: Persisted) {
       selectedPeriodId: state.selectedPeriodId,
       periodMetas: state.periodMetas,
       incomeEntries: state.incomeEntries,
+      cards: state.cards,
     }),
   );
 }
@@ -210,7 +215,7 @@ type Store = Persisted & {
   deleteCategory: (id: string) => void;
   updateExpense: (
     id: string,
-    patch: Partial<Pick<Expense, 'amount' | 'label' | 'categoryId' | 'date' | 'potId'>>,
+    patch: Partial<Pick<Expense, 'amount' | 'label' | 'categoryId' | 'date' | 'potId' | 'cardId'>>,
   ) => void;
   deleteExpense: (id: string) => void;
   addExpenseToPot: (params: {
@@ -218,11 +223,18 @@ type Store = Persisted & {
     amount: number;
     label?: string;
     date?: string;
+    cardId?: string;
   }) => boolean;
   addBulkExpensesToPot: (
     potId: string,
     text: string,
   ) => { added: number; errors: string[] };
+  addCard: (input: { name: string; kind: 'credit' | 'debit'; creditLimit?: number }) => string;
+  updateCard: (
+    id: string,
+    patch: Partial<Pick<Card, 'name' | 'kind' | 'creditLimit'>>,
+  ) => void;
+  deleteCard: (id: string) => void;
   deletePending: (id: string) => void;
   setOverallBudget: (periodId: string, amount: number) => void;
   setIncomeLump: (periodId: string, amount: number) => void;
@@ -306,6 +318,7 @@ export const useStore = create<Store>((set, get) => {
         categories = ensured.categories;
         const potId = potIdMap.get(e.potTempId);
         if (!potId) continue;
+        const cardId = matchCardInLabel(e.label, get().cards);
         newExpenses.push({
           id: uid('exp'),
           amount: e.amount,
@@ -315,6 +328,7 @@ export const useStore = create<Store>((set, get) => {
           periodId,
           date,
           createdAt: t,
+          ...(cardId ? { cardId } : {}),
         });
       }
 
@@ -350,6 +364,7 @@ export const useStore = create<Store>((set, get) => {
         selectedPeriodId: periodId,
         periodMetas,
         incomeEntries: get().incomeEntries,
+        cards: get().cards,
       };
       persist(next);
       set(next);
@@ -521,6 +536,12 @@ export const useStore = create<Store>((set, get) => {
           categoryId,
           potId,
           label: patch.label !== undefined ? patch.label.trim() || e.label : e.label,
+          cardId:
+            patch.cardId !== undefined
+              ? patch.cardId || undefined
+              : patch.label !== undefined
+                ? matchCardInLabel(patch.label.trim() || e.label, get().cards) ?? e.cardId
+                : e.cardId,
         };
       });
       const next = { ...get(), expenses, pots };
@@ -548,15 +569,21 @@ export const useStore = create<Store>((set, get) => {
 
       const period = get().periods.find((p) => p.id === pot.periodId);
       const t = nowIso();
+      const label = (params.label ?? '').trim() || 'expense';
+      const cardId =
+        params.cardId !== undefined
+          ? params.cardId || undefined
+          : matchCardInLabel(label, get().cards);
       const expense: Expense = {
         id: uid('exp'),
         amount,
-        label: (params.label ?? '').trim() || 'expense',
+        label,
         categoryId: ensured.id,
         potId: pot.id,
         periodId: pot.periodId,
         date: expenseDateForPeriod(period, params.date),
         createdAt: t,
+        ...(cardId ? { cardId } : {}),
       };
       const next = { ...get(), categories, expenses: [...get().expenses, expense] };
       persist(next);
@@ -581,16 +608,21 @@ export const useStore = create<Store>((set, get) => {
       const period = get().periods.find((p) => p.id === pot.periodId);
       const date = expenseDateForPeriod(period);
       const t = nowIso();
-      const newExpenses: Expense[] = parsed.map((row) => ({
-        id: uid('exp'),
-        amount: row.amount,
-        label: row.label,
-        categoryId: ensured.id,
-        potId: pot.id,
-        periodId: pot.periodId,
-        date,
-        createdAt: t,
-      }));
+      const cards = get().cards;
+      const newExpenses: Expense[] = parsed.map((row) => {
+        const cardId = matchCardInLabel(row.label, cards);
+        return {
+          id: uid('exp'),
+          amount: row.amount,
+          label: row.label,
+          categoryId: ensured.id,
+          potId: pot.id,
+          periodId: pot.periodId,
+          date,
+          createdAt: t,
+          ...(cardId ? { cardId } : {}),
+        };
+      });
 
       const next = {
         ...get(),
@@ -600,6 +632,54 @@ export const useStore = create<Store>((set, get) => {
       persist(next);
       set({ categories, expenses: next.expenses });
       return { added: newExpenses.length, errors };
+    },
+
+    addCard: (input) => {
+      const name = input.name.trim();
+      if (!name) return '';
+      const existing = get().cards.find((c) => c.name.toLowerCase() === name.toLowerCase());
+      if (existing) return existing.id;
+      const kind = input.kind === 'debit' ? 'debit' : 'credit';
+      const created: Card = {
+        id: uid('card'),
+        name,
+        kind,
+        creditLimit: kind === 'credit' ? Math.max(0, money(input.creditLimit ?? 0)) : 0,
+        createdAt: nowIso(),
+      };
+      const cards = [...get().cards, created];
+      const next = { ...get(), cards };
+      persist(next);
+      set({ cards });
+      return created.id;
+    },
+
+    updateCard: (id, patch) => {
+      const cards = get().cards.map((c) => {
+        if (c.id !== id) return c;
+        const kind = patch.kind ?? c.kind;
+        const name = patch.name !== undefined ? patch.name.trim() || c.name : c.name;
+        const creditLimit =
+          kind === 'debit'
+            ? 0
+            : patch.creditLimit !== undefined
+              ? Math.max(0, money(patch.creditLimit))
+              : c.creditLimit;
+        return { ...c, name, kind, creditLimit };
+      });
+      const next = { ...get(), cards };
+      persist(next);
+      set({ cards });
+    },
+
+    deleteCard: (id) => {
+      const cards = get().cards.filter((c) => c.id !== id);
+      const expenses = get().expenses.map((e) =>
+        e.cardId === id ? { ...e, cardId: undefined } : e,
+      );
+      const next = { ...get(), cards, expenses };
+      persist(next);
+      set({ cards, expenses });
     },
 
     deletePending: (id) => {
@@ -825,6 +905,10 @@ export function potSpent(potId: string, expenses: Expense[]): number {
 
 export function categorySpent(categoryId: string, expenses: Expense[]): number {
   return money(expenses.filter((e) => e.categoryId === categoryId).reduce((s, e) => s + e.amount, 0));
+}
+
+export function cardSpent(cardId: string, expenses: Expense[]): number {
+  return money(expenses.filter((e) => e.cardId === cardId).reduce((s, e) => s + e.amount, 0));
 }
 
 export function getCategoryBudget(cat: Category, periodId: string): number {

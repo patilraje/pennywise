@@ -16,6 +16,7 @@ type EditDraft = {
   categoryId: string;
   date: string;
   potId: string;
+  cardId: string;
 };
 
 export function TransactionsPage() {
@@ -23,6 +24,7 @@ export function TransactionsPage() {
   const allExpenses = useStore((s) => s.expenses);
   const allPots = useStore((s) => s.pots);
   const allPending = useStore((s) => s.pending);
+  const cards = useStore((s) => s.cards);
   const selectedPeriodId = useStore((s) => s.selectedPeriodId);
   const updateCategoryName = useStore((s) => s.updateCategoryName);
   const addCategory = useStore((s) => s.addCategory);
@@ -42,6 +44,7 @@ export function TransactionsPage() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [potAmountDraft, setPotAmountDraft] = useState<Record<string, string>>({});
   const [potLabelDraft, setPotLabelDraft] = useState<Record<string, string>>({});
+  const [potCardDraft, setPotCardDraft] = useState<Record<string, string>>({});
   const [potBulkOpen, setPotBulkOpen] = useState<Record<string, boolean>>({});
   const [potBulkText, setPotBulkText] = useState<Record<string, string>>({});
 
@@ -90,6 +93,7 @@ export function TransactionsPage() {
       categoryId: e.categoryId,
       date: e.date,
       potId: e.potId,
+      cardId: e.cardId ?? '',
     });
   };
 
@@ -111,6 +115,7 @@ export function TransactionsPage() {
       categoryId: draft.categoryId,
       date: draft.date,
       potId: draft.potId,
+      cardId: draft.cardId || undefined,
     });
     cancelEdit();
   };
@@ -122,14 +127,19 @@ export function TransactionsPage() {
       alert('Enter an amount greater than 0.');
       return;
     }
+    const cardOverride = potCardDraft[potId];
     const ok = addExpenseToPot({
       potId,
       amount,
       label: potLabelDraft[potId] ?? '',
+      ...(cardOverride !== undefined && cardOverride !== 'auto'
+        ? { cardId: cardOverride || undefined }
+        : {}),
     });
     if (ok) {
       setPotAmountDraft((d) => ({ ...d, [potId]: '' }));
       setPotLabelDraft((d) => ({ ...d, [potId]: '' }));
+      setPotCardDraft((d) => ({ ...d, [potId]: 'auto' }));
     }
   };
 
@@ -147,7 +157,7 @@ export function TransactionsPage() {
           : errors.join('\n'),
       );
     } else if (added === 0) {
-      alert('Paste lines like -4 sephora (one per line).');
+      alert('Paste lines like -4 sephora chase (one per line).');
     }
   };
 
@@ -225,6 +235,24 @@ export function TransactionsPage() {
               onChange={(ev) => setDraft({ ...draft, date: ev.target.value })}
             />
           </div>
+          <div>
+            <label className="text-xs text-muted" htmlFor={`card-${e.id}`}>
+              Card
+            </label>
+            <select
+              id={`card-${e.id}`}
+              className="mt-1 w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-accent"
+              value={draft.cardId}
+              onChange={(ev) => setDraft({ ...draft, cardId: ev.target.value })}
+            >
+              <option value="">None</option>
+              {cards.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} ({c.kind})
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <button
@@ -256,7 +284,7 @@ export function TransactionsPage() {
             <span className="font-semibold text-ink">
               {period ? periodLabel(period) : 'selected period'}
             </span>{' '}
-            only · add expenses under each pot (single or bulk)
+            only · type card name in the label (e.g. sephora chase) or pick a card
           </p>
         </div>
         {hasActivity ? (
@@ -326,8 +354,8 @@ export function TransactionsPage() {
       <section className="rounded-2xl border border-line bg-surface p-4 shadow-soft">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">Pots</h2>
         <p className="mt-1 text-xs text-muted">
-          Add one expense or bulk paste lines like <span className="font-mono">-4 sephora</span>{' '}
-          under each pot. Dedications are set on Budget.
+          Add one expense or bulk paste. Include your card keyword anywhere in the label
+          (e.g. <span className="font-mono">-4 sephora chase</span>). Dedications are on Budget.
         </p>
         {pots.length === 0 ? (
           <p className="mt-3 text-sm text-muted">
@@ -370,6 +398,7 @@ export function TransactionsPage() {
                   <ul className="mt-3 divide-y divide-line/80 rounded-lg bg-surface/80">
                     {potItems.map((e) => {
                       if (editingId === e.id && draft) return renderExpenseEdit(e);
+                      const card = cards.find((c) => c.id === e.cardId);
                       return (
                         <li
                           key={e.id}
@@ -377,7 +406,10 @@ export function TransactionsPage() {
                         >
                           <div className="min-w-0">
                             <p className="font-medium">{e.label}</p>
-                            <p className="text-xs text-muted">{e.date}</p>
+                            <p className="text-xs text-muted">
+                              {e.date}
+                              {card ? ` · ${card.name}` : ''}
+                            </p>
                           </div>
                           <div className="flex items-center gap-2">
                             <span className="tabular font-semibold text-danger">
@@ -437,7 +469,7 @@ export function TransactionsPage() {
                         </label>
                         <input
                           id={`pot-lbl-${p.id}`}
-                          placeholder="sephora"
+                          placeholder="sephora chase"
                           className="mt-1 w-full rounded-lg border border-line px-3 py-2 outline-none focus:ring-2 focus:ring-accent"
                           value={potLabelDraft[p.id] ?? ''}
                           onChange={(ev) =>
@@ -447,6 +479,27 @@ export function TransactionsPage() {
                             if (ev.key === 'Enter') submitPotExpense(p.id);
                           }}
                         />
+                      </div>
+                      <div className="sm:w-36">
+                        <label className="text-xs text-muted" htmlFor={`pot-card-${p.id}`}>
+                          Card
+                        </label>
+                        <select
+                          id={`pot-card-${p.id}`}
+                          className="mt-1 w-full rounded-lg border border-line bg-surface px-2 py-2 text-sm outline-none focus:ring-2 focus:ring-accent"
+                          value={potCardDraft[p.id] ?? 'auto'}
+                          onChange={(ev) =>
+                            setPotCardDraft((d) => ({ ...d, [p.id]: ev.target.value }))
+                          }
+                        >
+                          <option value="auto">Auto from label</option>
+                          <option value="">None</option>
+                          {cards.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                       <button
                         type="button"
@@ -470,7 +523,7 @@ export function TransactionsPage() {
                       </label>
                       <textarea
                         className="min-h-[100px] w-full rounded-lg border border-line bg-surface p-3 font-mono text-sm outline-none focus:ring-2 focus:ring-accent"
-                        placeholder={`-2\n-4 sephora\n-10 ulta`}
+                        placeholder={`-2 chase\n-4 sephora chase\n-10 ulta`}
                         value={potBulkText[p.id] ?? ''}
                         onChange={(ev) =>
                           setPotBulkText((d) => ({ ...d, [p.id]: ev.target.value }))

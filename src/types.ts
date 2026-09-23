@@ -1,3 +1,12 @@
+export type Card = {
+  id: string;
+  name: string;
+  kind: 'credit' | 'debit';
+  /** Credit limit; 0 for debit cards. */
+  creditLimit: number;
+  createdAt: string;
+};
+
 export type PayPeriod = {
   id: string;
   start: string;
@@ -44,6 +53,8 @@ export type Expense = {
   periodId: string;
   date: string;
   createdAt: string;
+  /** Optional card used for this expense. */
+  cardId?: string;
 };
 
 export type PendingNote = {

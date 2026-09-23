@@ -6,6 +6,7 @@ const links = [
   { to: '/', label: 'Ask PennyWise', end: true, color: 'bg-accent', soft: 'hover:bg-accent-soft' },
   { to: '/transactions', label: 'Spending', end: false, color: 'bg-coral', soft: 'hover:bg-coral-soft' },
   { to: '/budget', label: 'Budget', end: false, color: 'bg-amber', soft: 'hover:bg-amber-soft' },
+  { to: '/cards', label: 'Cards', end: false, color: 'bg-navy', soft: 'hover:bg-navy-soft' },
   { to: '/savings', label: 'Savings', end: false, color: 'bg-lime', soft: 'hover:bg-lime-soft' },
   { to: '/analytics', label: 'Analytics', end: false, color: 'bg-sky', soft: 'hover:bg-sky-soft' },
 ];
