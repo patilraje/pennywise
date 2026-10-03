@@ -65,6 +65,42 @@ export function ensurePeriodForDate(
   return { periods: list, period };
 }
 
+function daysBetweenInclusive(start: string, end: string): number {
+  const a = new Date(start + 'T12:00:00').getTime();
+  const b = new Date(end + 'T12:00:00').getTime();
+  return Math.round((b - a) / 86_400_000) + 1;
+}
+
+/**
+ * Period that overlaps the most with [start, end] (e.g. "Sept 20 - Oct 18" → Sep 21–Oct 18).
+ * Creates periods as needed; without an end date falls back to the period containing `start`.
+ */
+export function periodForRange(
+  periods: PayPeriod[],
+  start: string,
+  end?: string,
+  anchor = DEFAULT_ANCHOR,
+): { periods: PayPeriod[]; period: PayPeriod } {
+  const first = ensurePeriodForDate(periods, start, anchor);
+  if (!end || end < start) {
+    return { periods: first.periods, period: findPeriodByStart(first.periods, start) ?? first.period };
+  }
+  const second = ensurePeriodForDate(first.periods, end, anchor);
+  let best: PayPeriod = first.period;
+  let bestOverlap = 0;
+  for (const p of second.periods) {
+    const from = p.start > start ? p.start : start;
+    const to = p.end < end ? p.end : end;
+    if (from > to) continue;
+    const overlap = daysBetweenInclusive(from, to);
+    if (overlap > bestOverlap) {
+      best = p;
+      bestOverlap = overlap;
+    }
+  }
+  return { periods: second.periods, period: best };
+}
+
 export function findPeriodByStart(periods: PayPeriod[], start: string): PayPeriod | undefined {
   return periods.find((p) => p.start === start);
 }

@@ -1,5 +1,13 @@
 import type { HisaabParseResult, ProposedExpense, ProposedPot } from '../types';
+import { matchPotName } from '../utils/expenseLines';
 import { parseDateRangeHeader } from '../utils/periods';
+
+export type HisaabParseOptions = {
+  /** Existing pot/category names; named headings with no expenses must match one to stay a pot. */
+  knownPotNames?: string[];
+};
+
+const HEADING_NAME = String.raw`[A-Za-z][A-Za-z0-9 '’&./()]*?`;
 
 /** Keep up to 3 decimal places (some Hisaab lines use tenths of a cent). */
 function money(n: number): number {
@@ -34,7 +42,11 @@ function isIgnorableHeader(line: string): boolean {
   return false;
 }
 
-export function parseHisaabPaste(text: string): HisaabParseResult {
+export function parseHisaabPaste(
+  text: string,
+  opts: HisaabParseOptions = {},
+): HisaabParseResult {
+  const knownPotNames = opts.knownPotNames ?? [];
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -54,10 +66,20 @@ export function parseHisaabPaste(text: string): HisaabParseResult {
   let running = 0;
   let sawExpense = false;
   let potIndex = 0;
+  /** Letters-only line waiting for its amount on the next line (e.g. "Savings" then "2039.06"). */
+  let pendingName: { name: string; raw: string } | null = null;
+  /** Original heading line for named pots, so empty unknown ones can become pending notes. */
+  const headingLines = new Map<string, string>();
 
-  const startPot = (opening: number, name?: string) => {
+  const flushPendingName = () => {
+    if (pendingName) pending.push(pendingName.raw);
+    pendingName = null;
+  };
+
+  const startPot = (opening: number, name?: string, headingRaw?: string) => {
     potIndex += 1;
     currentTempId = uid('pot');
+    if (headingRaw) headingLines.set(currentTempId, headingRaw);
     currentName = (name?.trim() || `Pot ${potIndex}`).replace(/\s+/g, ' ');
     currentOpening = opening;
     running = opening;
@@ -115,30 +137,51 @@ export function parseHisaabPaste(text: string): HisaabParseResult {
     if (isIgnorableHeader(line)) continue;
 
     if (/^\?\?/.test(line)) {
+      flushPendingName();
       pending.push(raw);
       continue;
     }
 
     if (/to be added/i.test(line) && !/^-/.test(line)) {
+      flushPendingName();
       pending.push(raw);
       continue;
     }
 
-    const namedPot = line.match(/^(.+?)\s*-\s*(\d+(?:\.\d+)?)\s*$/);
-    if (namedPot && !/^-/.test(line) && !isDateRangeHeader(line)) {
-      const name = namedPot[1].trim();
-      const opening = money(Number(namedPot[2]));
-      if (/[A-Za-z]/.test(name)) {
-        startPot(opening, name);
-        continue;
-      }
+    // "Food 400", "Food - 400", "Insurance and car stuff 145"
+    const namedPot = line.match(new RegExp(`^(${HEADING_NAME})\\s*-?\\s*(\\d+(?:\\.\\d+)?)$`));
+    if (namedPot) {
+      flushPendingName();
+      startPot(money(Number(namedPot[2])), namedPot[1].trim(), raw);
+      continue;
+    }
+
+    // Name alone; its dedication follows on the next line
+    if (new RegExp(`^${HEADING_NAME}$`).test(line)) {
+      flushPendingName();
+      pendingName = { name: line, raw };
+      continue;
     }
 
     const expense = line.match(/^-(\d+(?:\.\d+)?)\s*(.*)$/);
     if (expense) {
+      if (pendingName) {
+        const { name, raw: headingRaw } = pendingName;
+        pendingName = null;
+        startPot(0, name, headingRaw);
+      }
       addExpense(money(Number(expense[1])), expense[2] || '');
       continue;
     }
+
+    const namedBare = pendingName ? line.match(/^(\d+(?:\.\d+)?)\.?$/) : null;
+    if (namedBare && pendingName) {
+      const { name, raw: headingRaw } = pendingName;
+      pendingName = null;
+      startPot(money(Number(namedBare[1])), name, headingRaw);
+      continue;
+    }
+    flushPendingName();
 
     const eqBal = line.match(/^=\s*(-?\d+(?:\.\d+)?)$/);
     if (eqBal) {
@@ -180,6 +223,18 @@ export function parseHisaabPaste(text: string): HisaabParseResult {
     }
 
     warnings.push(`Unrecognized line: ${raw}`);
+  }
+  flushPendingName();
+
+  // A named heading with no expenses that matches no existing pot is just a note (e.g. "swami uncle 351.93")
+  const potsWithExpenses = new Set(expenses.map((e) => e.potTempId));
+  for (let i = pots.length - 1; i >= 0; i--) {
+    const p = pots[i];
+    const headingRaw = headingLines.get(p.tempId);
+    if (!headingRaw || potsWithExpenses.has(p.tempId)) continue;
+    if (matchPotName(p.name, knownPotNames)) continue;
+    pots.splice(i, 1);
+    pending.push(headingRaw);
   }
 
   const periodNote = periodStart ? ` for ${periodStart}${periodEnd ? `–${periodEnd}` : ''}` : '';

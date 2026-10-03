@@ -11,13 +11,13 @@ import type {
   Pot,
 } from './types';
 import { categoryFromPot } from './services/hisaabParser';
-import { matchCardInLabel, parseExpenseBulkLines } from './utils/expenseLines';
+import { matchCardInLabel, matchPotName, parseExpenseBulkLines } from './utils/expenseLines';
 import {
   DEFAULT_ANCHOR,
   buildPeriodsFromAnchor,
   ensurePeriodForDate,
-  findPeriodByStart,
   makePeriod,
+  periodForRange,
 } from './utils/periods';
 
 const STORAGE_KEY = 'pennywise-v2';
@@ -198,7 +198,10 @@ function expenseDateForPeriod(period: PayPeriod | undefined, date?: string): str
 type Store = Persisted & {
   setSelectedPeriodId: (id: string) => void;
   ensurePeriodsThrough: (date: string) => void;
-  confirmParse: (result: HisaabParseResult) => void;
+  confirmParse: (
+    result: HisaabParseResult,
+    decisions?: Record<string, DuplicateDecision>,
+  ) => ParseMergeStats;
   updateCategoryName: (id: string, name: string) => void;
   updateCategoryBudget: (
     id: string,
@@ -211,6 +214,7 @@ type Store = Persisted & {
     openingAmount: number,
     scope?: 'this' | 'following',
   ) => void;
+  deletePot: (potId: string, scope?: 'this' | 'following') => void;
   addCategory: (name: string) => string;
   deleteCategory: (id: string) => void;
   updateExpense: (
@@ -270,19 +274,14 @@ export const useStore = create<Store>((set, get) => {
       set({ periods, periodMetas: metas });
     },
 
-    confirmParse: (result) => {
+    confirmParse: (result, decisions = {}) => {
       let periods = get().periods;
       let periodId = get().selectedPeriodId;
 
       if (result.periodStart) {
-        const { periods: nextPeriods, period } = ensurePeriodForDate(periods, result.periodStart);
-        periods = nextPeriods;
-        // Prefer exact start match
-        const byStart = findPeriodByStart(periods, result.periodStart) ?? period;
-        periodId = byStart.id;
-        if (!periods.some((p) => p.id === byStart.id)) {
-          periods = [...periods, byStart].sort((a, b) => a.start.localeCompare(b.start));
-        }
+        const picked = periodForRange(periods, result.periodStart, result.periodEnd);
+        periods = picked.periods;
+        periodId = picked.period.id;
       }
 
       const period = periods.find((p) => p.id === periodId) ?? periods[0];
@@ -290,84 +289,41 @@ export const useStore = create<Store>((set, get) => {
       const date =
         todayIso() >= period.start && todayIso() <= period.end ? todayIso() : period.start;
 
-      let categories = [...get().categories];
       let periodMetas = get().periodMetas;
       if (!periodMetas.some((m) => m.periodId === periodId)) {
         periodMetas = [...periodMetas, emptyMeta(periodId)];
       }
-
-      const potIdMap = new Map<string, string>();
-      const newPots: Pot[] = [];
-      const newExpenses: Expense[] = [];
-      const t = nowIso();
-
-      for (const p of result.pots) {
-        const id = uid('pot');
-        potIdMap.set(p.tempId, id);
-        newPots.push({
-          id,
-          name: p.name,
-          openingAmount: p.openingAmount,
-          periodId,
-          createdAt: t,
-        });
+      {
+        const staged = { ...get(), periods, periodMetas, selectedPeriodId: periodId };
+        persist(staged);
+        set({ periods, periodMetas, selectedPeriodId: periodId });
       }
+      get().ensurePeriodPots(periodId);
 
-      for (const e of result.expenses) {
-        const ensured = ensureCategory(categories, e.categoryName, periodId);
-        categories = ensured.categories;
-        const potId = potIdMap.get(e.potTempId);
-        if (!potId) continue;
-        const cardId = matchCardInLabel(e.label, get().cards);
-        newExpenses.push({
-          id: uid('exp'),
-          amount: e.amount,
-          label: e.label,
-          categoryId: ensured.id,
-          potId,
-          periodId,
-          date,
-          createdAt: t,
-          ...(cardId ? { cardId } : {}),
-        });
-      }
-
-      // Dedicate category budgets from pot openings (Food - 500 → Food budget 500)
-      for (const p of newPots) {
-        const ensured = ensureCategory(categories, p.name, periodId);
-        categories = ensured.categories.map((c) =>
-          c.id === ensured.id
-            ? {
-                ...c,
-                budgetsByPeriod: {
-                  ...c.budgetsByPeriod,
-                  [periodId]: money(p.openingAmount),
-                },
-              }
-            : c,
-        );
-      }
-
-      const newPending: PendingNote[] = result.pending.map((text) => ({
-        id: uid('pend'),
-        text,
+      const merged = mergeParseIntoPeriod(result, {
+        categories: get().categories,
+        pots: get().pots,
+        expenses: get().expenses,
+        pending: get().pending,
+        cards: get().cards,
+        periods,
         periodId,
-        createdAt: t,
-      }));
+        date,
+      }, decisions);
 
       const next: Persisted = {
-        categories,
-        pots: [...get().pots, ...newPots],
-        expenses: [...get().expenses, ...newExpenses],
-        pending: [...get().pending, ...newPending],
+        ...get(),
+        categories: merged.categories,
+        pots: merged.pots,
+        expenses: merged.expenses,
+        pending: merged.pending,
         periods,
         selectedPeriodId: periodId,
         periodMetas,
-        incomeEntries: get().incomeEntries,
-        cards: get().cards,
       };
       persist(next);
       set(next);
+      return merged.stats;
     },
 
     updateCategoryName: (id, name) => {
@@ -391,6 +347,7 @@ export const useStore = create<Store>((set, get) => {
       const t = nowIso();
 
       for (const targetId of targets) {
+        if (targetId !== pid && !isCategoryActiveInPeriod(cat, targetId, get().periods)) continue;
         categories = categories.map((c) =>
           c.id === id
             ? { ...c, budgetsByPeriod: { ...c.budgetsByPeriod, [targetId]: amount } }
@@ -431,6 +388,16 @@ export const useStore = create<Store>((set, get) => {
       const t = nowIso();
 
       for (const targetId of targets) {
+        const existingCat = categories.find(
+          (c) => c.name.toLowerCase() === pot.name.toLowerCase(),
+        );
+        if (
+          targetId !== pot.periodId &&
+          existingCat &&
+          !isCategoryActiveInPeriod(existingCat, targetId, get().periods)
+        ) {
+          continue;
+        }
         const ensured = ensureCategory(categories, pot.name, targetId);
         categories = ensured.categories.map((c) =>
           c.id === ensured.id
@@ -461,11 +428,56 @@ export const useStore = create<Store>((set, get) => {
       set({ pots, categories });
     },
 
+    deletePot: (potId, scope = 'this') => {
+      const pot = get().pots.find((p) => p.id === potId);
+      if (!pot) return;
+      const periods = get().periods;
+      const nameKey = pot.name.toLowerCase();
+      const targets = new Set(periodIdsFromInclusive(periods, pot.periodId, scope));
+
+      const removedPotIds = new Set(
+        get()
+          .pots.filter((p) => targets.has(p.periodId) && p.name.toLowerCase() === nameKey)
+          .map((p) => p.id),
+      );
+      removedPotIds.add(pot.id);
+      const pots = get().pots.filter((p) => !removedPotIds.has(p.id));
+      const expenses = get().expenses.filter((e) => !removedPotIds.has(e.potId));
+
+      const fromStart = periodStartOf(pot.periodId, periods);
+      const categories = get().categories.map((c) => {
+        if (c.name.toLowerCase() !== nameKey) return c;
+        const budgetsByPeriod = { ...c.budgetsByPeriod };
+        for (const pid of targets) budgetsByPeriod[pid] = 0;
+        if (scope === 'following' && fromStart) {
+          return { ...c, budgetsByPeriod, removedFromPeriod: fromStart };
+        }
+        const removedPeriods = [...new Set([...(c.removedPeriods ?? []), pot.periodId])];
+        return { ...c, budgetsByPeriod, removedPeriods };
+      });
+
+      const next = { ...get(), pots, expenses, categories };
+      persist(next);
+      set({ pots, expenses, categories });
+    },
+
     addCategory: (name) => {
       const trimmed = name.trim();
       if (!trimmed) return '';
       const existing = get().categories.find((c) => c.name.toLowerCase() === trimmed.toLowerCase());
-      if (existing) return existing.id;
+      if (existing) {
+        const pid = get().selectedPeriodId;
+        if (!isCategoryActiveInPeriod(existing, pid, get().periods)) {
+          const categories = get().categories.map((c) =>
+            c.id === existing.id ? reviveCategoryInPeriod(c, pid, get().periods) : c,
+          );
+          const next = { ...get(), categories };
+          persist(next);
+          set({ categories });
+          get().ensurePeriodPots(pid);
+        }
+        return existing.id;
+      }
       const pid = get().selectedPeriodId;
       const created: Category = { id: uid('cat'), name: trimmed, budgetsByPeriod: { [pid]: 0 } };
       const categories = [...get().categories, created];
@@ -828,6 +840,251 @@ export const useStore = create<Store>((set, get) => {
   };
 });
 
+export type ParseMergeStats = {
+  potsUpdated: number;
+  potsCreated: number;
+  expensesAdded: number;
+  expensesSkipped: number;
+  keptBoth: number;
+  replaced: number;
+  pendingAdded: number;
+};
+
+/** What to do with a pasted line that matches an already-saved expense. */
+export type DuplicateDecision = { keepSaved: boolean; addPasted: boolean };
+
+export type ParseDuplicate = { expenseTempId: string; existing: Expense };
+
+function expenseKey(potId: string, amount: number, label: string): string {
+  return `${potId}|${money(amount)}|${label.trim().toLowerCase()}`;
+}
+
+/** Parsed pot tempId → existing pot in the period with a matching name. */
+export function resolveParsedPots(
+  result: HisaabParseResult,
+  pots: Pot[],
+  periodId: string,
+): Map<string, Pot> {
+  const periodPots = pots.filter((p) => p.periodId === periodId);
+  const names = periodPots.map((p) => p.name);
+  const out = new Map<string, Pot>();
+  for (const p of result.pots) {
+    const matched = matchPotName(p.name, names);
+    if (!matched) continue;
+    const pot = periodPots.find((x) => x.name.toLowerCase() === matched.toLowerCase());
+    if (pot) out.set(p.tempId, pot);
+  }
+  return out;
+}
+
+/**
+ * Pasted expenses that match an already-saved expense in the same pot (amount + label),
+ * paired one-to-one: two saved "-10 kfc" and three pasted give two pairs.
+ */
+export function findParseDuplicates(
+  result: HisaabParseResult,
+  ctx: { pots: Pot[]; expenses: Expense[]; periodId: string },
+): ParseDuplicate[] {
+  const potMap = resolveParsedPots(result, ctx.pots, ctx.periodId);
+  if (potMap.size === 0) return [];
+  const saved = new Map<string, Expense[]>();
+  for (const e of ctx.expenses) {
+    if (e.periodId !== ctx.periodId) continue;
+    const key = expenseKey(e.potId, e.amount, e.label);
+    saved.set(key, [...(saved.get(key) ?? []), e]);
+  }
+  const out: ParseDuplicate[] = [];
+  for (const e of result.expenses) {
+    const pot = potMap.get(e.potTempId);
+    if (!pot) continue;
+    const queue = saved.get(expenseKey(pot.id, e.amount, e.label));
+    const existing = queue?.shift();
+    if (existing) out.push({ expenseTempId: e.tempId, existing });
+  }
+  return out;
+}
+
+/**
+ * Merge a parsed Hisaab paste into one period: reuse that period's pots by name and
+ * set their openings/dedications. Pasted lines matching a saved expense follow
+ * `decisions`; without a decision they are skipped, so re-pasting adds nothing.
+ */
+export function mergeParseIntoPeriod(
+  result: HisaabParseResult,
+  ctx: {
+    categories: Category[];
+    pots: Pot[];
+    expenses: Expense[];
+    pending: PendingNote[];
+    cards: Card[];
+    periods: PayPeriod[];
+    periodId: string;
+    date: string;
+  },
+  decisions: Record<string, DuplicateDecision> = {},
+): {
+  categories: Category[];
+  pots: Pot[];
+  expenses: Expense[];
+  pending: PendingNote[];
+  stats: ParseMergeStats;
+} {
+  const { periodId, periods, date, cards } = ctx;
+  let categories = [...ctx.categories];
+  let pots = [...ctx.pots];
+  const t = nowIso();
+  const stats: ParseMergeStats = {
+    potsUpdated: 0,
+    potsCreated: 0,
+    expensesAdded: 0,
+    expensesSkipped: 0,
+    keptBoth: 0,
+    replaced: 0,
+    pendingAdded: 0,
+  };
+
+  const existingPots = resolveParsedPots(result, ctx.pots, periodId);
+  const duplicates = new Map(
+    findParseDuplicates(result, { pots: ctx.pots, expenses: ctx.expenses, periodId }).map((d) => [
+      d.expenseTempId,
+      d.existing,
+    ]),
+  );
+
+  const potIdMap = new Map<string, { id: string; name: string }>();
+  for (const p of result.pots) {
+    const opening = money(p.openingAmount);
+    const existing = existingPots.get(p.tempId);
+    let potName: string;
+    if (existing) {
+      pots = pots.map((x) => (x.id === existing.id ? { ...x, openingAmount: opening } : x));
+      potIdMap.set(p.tempId, { id: existing.id, name: existing.name });
+      potName = existing.name;
+      stats.potsUpdated += 1;
+    } else {
+      // Category may exist but its pot was removed for this period — bring it back
+      const catName = matchPotName(p.name, categories.map((c) => c.name)) ?? p.name;
+      categories = categories.map((c) =>
+        c.name.toLowerCase() === catName.toLowerCase()
+          ? reviveCategoryInPeriod(c, periodId, periods)
+          : c,
+      );
+      const id = uid('pot');
+      pots = [...pots, { id, name: catName, openingAmount: opening, periodId, createdAt: t }];
+      potIdMap.set(p.tempId, { id, name: catName });
+      potName = catName;
+      stats.potsCreated += 1;
+    }
+    const ensured = ensureCategory(categories, potName, periodId);
+    categories = ensured.categories.map((c) =>
+      c.id === ensured.id
+        ? { ...c, budgetsByPeriod: { ...c.budgetsByPeriod, [periodId]: opening } }
+        : c,
+    );
+  }
+
+  const newExpenses: Expense[] = [];
+  const removedIds = new Set<string>();
+  for (const e of result.expenses) {
+    const pot = potIdMap.get(e.potTempId);
+    if (!pot) continue;
+    const saved = duplicates.get(e.tempId);
+    if (saved) {
+      const decision = decisions[e.tempId] ?? { keepSaved: true, addPasted: false };
+      if (!decision.addPasted) {
+        stats.expensesSkipped += 1;
+        continue;
+      }
+      if (decision.keepSaved) {
+        stats.keptBoth += 1;
+      } else {
+        removedIds.add(saved.id);
+        stats.replaced += 1;
+      }
+    }
+    const ensured = ensureCategory(categories, categoryFromPot(pot.name), periodId);
+    categories = ensured.categories;
+    const cardId = matchCardInLabel(e.label, cards);
+    newExpenses.push({
+      id: uid('exp'),
+      amount: money(e.amount),
+      label: e.label,
+      categoryId: ensured.id,
+      potId: pot.id,
+      periodId,
+      date,
+      createdAt: t,
+      ...(cardId ? { cardId } : {}),
+    });
+  }
+  stats.expensesAdded = newExpenses.length - stats.keptBoth - stats.replaced;
+
+  const existingNotes = new Set(
+    ctx.pending
+      .filter((n) => n.periodId === periodId)
+      .map((n) => n.text.trim().toLowerCase()),
+  );
+  const newPending: PendingNote[] = [];
+  for (const text of result.pending) {
+    const key = text.trim().toLowerCase();
+    if (existingNotes.has(key)) continue;
+    existingNotes.add(key);
+    newPending.push({ id: uid('pend'), text, periodId, createdAt: t });
+  }
+  stats.pendingAdded = newPending.length;
+
+  return {
+    categories,
+    pots,
+    expenses: [...ctx.expenses.filter((e) => !removedIds.has(e.id)), ...newExpenses],
+    pending: [...ctx.pending, ...newPending],
+    stats,
+  };
+}
+
+export function periodStartOf(periodId: string, periods: PayPeriod[]): string | undefined {
+  const found = periods.find((p) => p.id === periodId);
+  if (found) return found.start;
+  return periodId.match(/^pp-(\d{4}-\d{2}-\d{2})_/)?.[1];
+}
+
+/** False when the category's pot was removed for this period (or from an earlier period on). */
+export function isCategoryActiveInPeriod(
+  cat: Category,
+  periodId: string,
+  periods: PayPeriod[] = [],
+): boolean {
+  if (cat.removedPeriods?.includes(periodId)) return false;
+  if (cat.removedFromPeriod) {
+    const start = periodStartOf(periodId, periods);
+    if (start && start >= cat.removedFromPeriod) return false;
+  }
+  return true;
+}
+
+/** Re-enable a category for one period, keeping other removals in place. */
+export function reviveCategoryInPeriod(
+  cat: Category,
+  periodId: string,
+  periods: PayPeriod[],
+): Category {
+  let removedPeriods = (cat.removedPeriods ?? []).filter((id) => id !== periodId);
+  let removedFromPeriod = cat.removedFromPeriod;
+  const start = periodStartOf(periodId, periods);
+  if (removedFromPeriod && start && start >= removedFromPeriod) {
+    const gap = periods
+      .filter((p) => p.start >= removedFromPeriod! && p.start < start)
+      .map((p) => p.id);
+    removedPeriods = [...new Set([...removedPeriods, ...gap])];
+    removedFromPeriod = undefined;
+  }
+  const next: Category = { ...cat, removedPeriods };
+  if (removedFromPeriod) next.removedFromPeriod = removedFromPeriod;
+  else delete next.removedFromPeriod;
+  if (next.removedPeriods?.length === 0) delete next.removedPeriods;
+  return next;
+}
+
 /** Period ids from `periodId` through the end of the sorted list (or just that id). */
 export function periodIdsFromInclusive(
   periods: PayPeriod[],
@@ -888,6 +1145,7 @@ export function potsToCreateForPeriod(
   );
   return categories
     .filter((c) => !covered.has(c.name.toLowerCase()))
+    .filter((c) => isCategoryActiveInPeriod(c, periodId, periods))
     .map((c) => ({
       name: c.name,
       openingAmount: openingForNewPeriodPot(c.name, periodId, categories, pots, periods),

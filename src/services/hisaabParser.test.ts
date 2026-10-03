@@ -66,6 +66,49 @@ Rent  - 1000
 -1013.905
 `;
 
+const septSample = `Sept 20 - oct 18
+
+swami uncle 351.93
+
+Food 400
+-25.52 safeway chase
+-27.93 tacos discover
+-24.58 trader joe’s discover 
+-10.81 kfc discover 
+
+Other 1000
+-13.31 niki ciggs discover 
+-9.45 usps envelopes discover 
+-10.64 fry’s flowers and candy discover
+-19 visible discover
+-6.43 soundcloud discover
+-5.4 printing tempe library chase
+
+Gas 350
+-71.70 sam’s club chase 
+-74.66 sam’s club chase
+
+Rent 1015
+-954.53 huntington
+
+Insurance and car stuff 145
+
+Savings 2039.06
+-1000 federal tax return 2021 huntington
+
+Costco 5
+`;
+
+const knownPotNames = [
+  'Food',
+  'Other',
+  'Gas',
+  'Rent',
+  'Insurance etc',
+  'Savings',
+  'Costco Membership',
+];
+
 describe('periods', () => {
   it('Aug 24 four-week chunk ends Sep 20', () => {
     const p = makePeriod(DEFAULT_ANCHOR);
@@ -103,5 +146,47 @@ describe('hisaabParser', () => {
     expect(res.periodEnd).toBe('2026-09-20');
     const underOther = res.expenses.filter((e) => e.categoryName === 'Other');
     expect(underOther.some((e) => /gas station nutella/i.test(e.label))).toBe(true);
+  });
+
+  it('parses "Name 123" headings from the Sept paste', () => {
+    const res = parseHisaabPaste(septSample, { knownPotNames });
+    expect(res.periodStart).toBe('2026-09-20');
+    expect(res.periodEnd).toBe('2026-10-18');
+    expect(res.pots.map((p) => [p.name, p.openingAmount])).toEqual([
+      ['Food', 400],
+      ['Other', 1000],
+      ['Gas', 350],
+      ['Rent', 1015],
+      ['Insurance and car stuff', 145],
+      ['Savings', 2039.06],
+      ['Costco', 5],
+    ]);
+    expect(res.expenses).toHaveLength(14);
+    expect(res.pending).toEqual(['swami uncle 351.93']);
+    expect(res.warnings.filter((w) => /Unrecognized|before a pot/.test(w))).toEqual([]);
+
+    const potName = (tempId: string) => res.pots.find((p) => p.tempId === tempId)?.name;
+    const savings = res.expenses.filter((e) => potName(e.potTempId) === 'Savings');
+    expect(savings.map((e) => e.amount)).toEqual([1000]);
+    expect(res.expenses.filter((e) => potName(e.potTempId) === 'Food')).toHaveLength(4);
+  });
+
+  it('accepts the dedication on the line under the pot name', () => {
+    const res = parseHisaabPaste(`Savings\n2039.06\n-1000 tax huntington\nFood\n400`, {
+      knownPotNames,
+    });
+    expect(res.pots.map((p) => [p.name, p.openingAmount])).toEqual([
+      ['Savings', 2039.06],
+      ['Food', 400],
+    ]);
+    expect(res.expenses).toHaveLength(1);
+  });
+
+  it('keeps an empty heading as a pot only when it matches a known pot', () => {
+    const res = parseHisaabPaste(`Insurance and car stuff 145\nswami uncle 351.93`, {
+      knownPotNames,
+    });
+    expect(res.pots.map((p) => p.name)).toEqual(['Insurance and car stuff']);
+    expect(res.pending).toEqual(['swami uncle 351.93']);
   });
 });

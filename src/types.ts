@@ -34,6 +34,10 @@ export type Category = {
   name: string;
   /** Per-period category budgets. */
   budgetsByPeriod: Record<string, number>;
+  /** Period ids where this category's pot was removed (that period only). */
+  removedPeriods?: string[];
+  /** ISO start date: pot removed from this period onward. */
+  removedFromPeriod?: string;
 };
 
 export type Pot = {

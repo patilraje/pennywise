@@ -53,6 +53,39 @@ export function matchCardInLabel(
   return best?.id;
 }
 
+function normalizePotName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Find the existing pot/category name a pasted heading refers to.
+ * Exact (case-insensitive) first, then a unique prefix match ("Costco" → "Costco Membership"),
+ * then a unique first-word match ("Insurance and car stuff" → "Insurance etc").
+ */
+export function matchPotName(name: string, names: string[]): string | undefined {
+  const target = normalizePotName(name);
+  if (!target) return undefined;
+  const normalized = names.map((n) => ({ raw: n, norm: normalizePotName(n) })).filter((n) => n.norm);
+
+  const exact = normalized.find((n) => n.norm === target);
+  if (exact) return exact.raw;
+
+  const prefix = normalized.filter(
+    (n) => n.norm.startsWith(`${target} `) || target.startsWith(`${n.norm} `),
+  );
+  if (prefix.length === 1) return prefix[0].raw;
+
+  const firstWord = target.split(' ')[0];
+  const byFirst = normalized.filter((n) => n.norm.split(' ')[0] === firstWord);
+  if (byFirst.length === 1) return byFirst[0].raw;
+
+  return undefined;
+}
+
 /**
  * Parse bulk expense lines for a pot, e.g.:
  * -2

@@ -8,6 +8,7 @@ import {
 } from '@/store';
 import type { Expense } from '@/types';
 import { colorForName, softForName } from '@/utils/chartColors';
+import { confirmRemovePot } from '@/utils/confirmRemovePot';
 import { periodLabel } from '@/utils/periods';
 
 type EditDraft = {
@@ -36,6 +37,7 @@ export function TransactionsPage() {
   const deletePending = useStore((s) => s.deletePending);
   const clearTransactions = useStore((s) => s.clearTransactions);
   const ensurePeriodPots = useStore((s) => s.ensurePeriodPots);
+  const deletePot = useStore((s) => s.deletePot);
   const periods = useStore((s) => s.periods);
 
   const [nameDrafts, setNameDrafts] = useState<Record<string, string>>({});
@@ -387,8 +389,20 @@ export function TransactionsPage() {
                       <span className="h-2.5 w-2.5 rounded-full" style={{ background: color }} />
                       {p.name}
                     </span>
-                    <span className="tabular" style={{ color }}>
-                      {formatMoney(rem)} left
+                    <span className="flex items-center gap-2">
+                      <span className="tabular" style={{ color }}>
+                        {formatMoney(rem)} left
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const scope = confirmRemovePot(p.name, potItems.length);
+                          if (scope) deletePot(p.id, scope);
+                        }}
+                        className="rounded-md border border-danger/30 px-2 py-1 text-xs font-semibold text-danger hover:bg-danger/5"
+                      >
+                        Remove pot
+                      </button>
                     </span>
                   </div>
                   <p className="mt-1 text-xs text-muted">

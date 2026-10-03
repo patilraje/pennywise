@@ -7,10 +7,12 @@ import {
   getPeriodIncome,
   getPeriodMeta,
   getTotalDedicated,
+  isCategoryActiveInPeriod,
   potSpent,
   useStore,
 } from '@/store';
 import { colorForName, softForName } from '@/utils/chartColors';
+import { confirmRemovePot } from '@/utils/confirmRemovePot';
 import { periodLabel } from '@/utils/periods';
 
 export function BudgetPage() {
@@ -28,6 +30,7 @@ export function BudgetPage() {
   const deleteIncomeEntry = useStore((s) => s.deleteIncomeEntry);
   const syncPeriodAllocations = useStore((s) => s.syncPeriodAllocations);
   const ensurePeriodPots = useStore((s) => s.ensurePeriodPots);
+  const deletePot = useStore((s) => s.deletePot);
 
   const period = periods.find((p) => p.id === selectedPeriodId);
   const expenses = useMemo(
@@ -69,6 +72,7 @@ export function BudgetPage() {
 
   const categoryRows = useMemo(() => {
     return categories
+      .filter((c) => isCategoryActiveInPeriod(c, selectedPeriodId, periods))
       .map((c) => {
         const pot = pots.find((p) => p.name.toLowerCase() === c.name.toLowerCase());
         // Pot opening is the real allocation from income
@@ -84,7 +88,7 @@ export function BudgetPage() {
         if (aActive !== bActive) return aActive - bActive;
         return a.name.localeCompare(b.name);
       });
-  }, [categories, expenses, selectedPeriodId, pots]);
+  }, [categories, expenses, selectedPeriodId, pots, periods]);
 
   const totalSpent = useMemo(
     () => Math.round(expenses.reduce((s, e) => s + e.amount, 0) * 1000) / 1000,
@@ -397,6 +401,17 @@ export function BudgetPage() {
                       >
                         {formatMoney(p.remaining)} left
                       </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const count = expenses.filter((e) => e.potId === p.id).length;
+                          const scope = confirmRemovePot(p.name, count);
+                          if (scope) deletePot(p.id, scope);
+                        }}
+                        className="rounded-md border border-danger/30 px-2 py-1 text-xs font-semibold text-danger hover:bg-danger/5"
+                      >
+                        Remove pot
+                      </button>
                     </div>
                   </div>
                   <div className="mb-1 text-xs text-muted">
